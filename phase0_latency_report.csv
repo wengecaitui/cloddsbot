@@ -1,0 +1,9 @@
+step,latency_ms,tokens,status
+analyst_market,10781.0,418,ok
+analyst_fundamental,5292.0,418,ok
+analyst_sentiment,5131.0,418,ok
+analyst_technical,4921.0,424,ok
+bull_debate,4597.0,463,ok
+bear_debate,4807.0,422,ok
+research_manager,5042.0,459,ok
+TOTAL,42573.0,3022,ok
