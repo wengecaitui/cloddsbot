@@ -1,3 +1,26 @@
+# CloddsBot 改造工程日志
+
+## Phase 0 — 延迟基准测试 (2026-07-05)
+- 实测 GLM-5.2 完整多 Agent 流程延迟: **42.6s**
+- 决策: **必须上快慢分道** (Slow path > 5s 阈值)
+- 产出: `scripts/phase0_latency_benchmark.py`
+
+## Phase 1 — Provider 层改造 (2026-07-05)
+- OrangeAI 双发动机: `orangeai-slow` (300s timeout) + `orangeai-fast` (5s timeout)
+- Fallback chain: siliconflow (SILICONFLOW_API_KEY)
+- /health 增强: 延迟检测 + 1.5s fast path 熔断报警
+- 精度风险区: bn.js / @noble/* (Phase 4 Python bridge 目标)
+- 全量依赖扫描: 1724 个包
+- Claude 代码热力图: 393 行 (⚡5.3% Fast / 🧠94.7% Slow)
+
+## Phase 2 — Claude → OpenAI 桥接层 (2026-07-05)
+- 新增 `ClaudeToOpenAIBridge.ts`: claudeToolToOpenAI / claudeMessagesToOpenAI / safeJsonStringify
+- 全量 Skill 矩阵: 216 工具 (150 Read-Only / 66 Write-Action)
+- Write-Action 必须走 Fast Path (>1.5s 超时熔断)
+- bn.js/@noble/* 精度风险区标记
+
+---
+
 # Changelog
 
 All notable changes to Clodds will be documented in this file.
