@@ -1,0 +1,217 @@
+tool_name,lane,description
+search_markets,Read-Only,Search prediction markets by keyword across all platforms. Returns top results with current prices.
+get_market,Read-Only,"Search query (e.g., ""Trump 2028"", ""Fed rate cut"", ""Bitcoin 100k"")"
+market_index_sync,Read-Only,Optional: filter to specific platform
+market_index_search,Read-Only,Get detailed info about a specific market including all outcomes and prices
+market_index_stats,Read-Only,The market ID or slug
+market_index_last_sync,Read-Only,The platform
+market_index_prune,Read-Only,"Sync market index for semantic search (Polymarket, Kalshi, Manifold, Metaculus)."
+get_portfolio,Read-Only,Optional list of platforms to sync
+get_portfolio_history,Read-Only,Max markets to index per platform (default 500)
+add_position,Read-Only,Market status filter
+create_alert,Write-Action,Exclude sports-related markets (default true)
+list_alerts,Read-Only,Minimum 24h volume threshold (best-effort per platform)
+delete_alert,Write-Action,Minimum liquidity threshold (best-effort per platform)
+get_recent_news,Read-Only,Minimum open interest threshold (Kalshi only)
+search_news,Read-Only,Minimum number of predictions (Metaculus only)
+get_news_for_market,Read-Only,Exclude resolved markets regardless of status filter
+analyze_edge,Read-Only,Semantic search over indexed markets.
+calculate_kelly,Read-Only,Search query
+watch_wallet,Read-Only,Optional platform filter
+unwatch_wallet,Read-Only,Max results (default 10)
+list_watched_wallets,Read-Only,Max candidates to consider (default 1500)
+get_wallet_trades,Write-Action,Minimum similarity score to include
+get_wallet_positions,Read-Only,Optional per-platform weights (overrides config)
+get_wallet_pnl,Read-Only,Get indexed market counts by platform.
+get_top_traders,Write-Action,Optional list of platforms to report
+copy_trade,Write-Action,Get the last market index sync summary.
+enable_auto_copy,Read-Only,Prune stale indexed markets.
+disable_auto_copy,Read-Only,Optional platform to prune
+list_auto_copy,Read-Only,Age in ms beyond which entries are removed
+find_arbitrage,Read-Only,Get portfolio P&L history snapshots for the user
+compare_prices,Read-Only,Only return snapshots after this timestamp (ms)
+execute_arbitrage,Write-Action,Max snapshots to return (default 200)
+paper_trading_mode,Read-Only,Sort order (default desc)
+paper_balance,Read-Only,Manually track a position (for platforms without API sync)
+paper_positions,Read-Only,Platform name
+paper_reset,Read-Only,Market question text
+paper_history,Read-Only,"Outcome name (e.g., ""Yes"", ""No"", ""Trump"")"
+whale_alerts,Read-Only,Number of shares
+new_market_alerts,Read-Only,Average entry price (0.0-1.0)
+volume_spike_alerts,Read-Only,Create a price alert for a market
+polymarket_buy,Write-Action,Market name (for display)
+polymarket_sell,Write-Action,Alert condition
+polymarket_positions,Read-Only,"Threshold (0.0-1.0 for price, percentage for change)"
+polymarket_cancel_all,Write-Action,List all active alerts for the user
+polymarket_orderbook,Write-Action,Delete an alert
+polymarket_balance,Read-Only,Alert ID to delete
+polymarket_cancel,Write-Action,Get recent market-moving news
+polymarket_orders,Write-Action,Number of items (default 10)
+polymarket_market_sell,Write-Action,Search news by keyword
+polymarket_market_buy,Write-Action,Search query
+polymarket_maker_buy,Write-Action,Get news relevant to a specific market
+polymarket_maker_sell,Write-Action,The market question to find news for
+polymarket_fee_rate,Read-Only,"Analyze potential edge by comparing market price to external models (538, CME FedWatch, polls)"
+polymarket_midpoint,Read-Only,Market question
+polymarket_spread,Read-Only,Current market price (0.0-1.0)
+polymarket_last_trade,Write-Action,Market category for finding relevant external data
+polymarket_tick_size,Read-Only,Calculate Kelly criterion bet sizing given edge estimate
+polymarket_trades,Write-Action,Current market price (0.0-1.0)
+polymarket_cancel_market,Write-Action,Your estimated true probability (0.0-1.0)
+polymarket_estimate_fill,Read-Only,Available bankroll in dollars
+polymarket_market_info,Read-Only,Start tracking a wallet/user for real-time trade alerts. Get notified when they buy/sell.
+orderbook_imbalance,Write-Action,Wallet address (0x...) or username depending on platform
+polymarket_health,Read-Only,"Optional nickname for this wallet (e.g., ""Whale #1"")"
+polymarket_server_time,Read-Only,Stop tracking a wallet address
+polymarket_get_address,Read-Only,Wallet address to stop watching
+polymarket_collateral_address,Read-Only,List all wallets you are currently tracking
+polymarket_conditional_address,Read-Only,Get recent trades for a specific wallet/user
+polymarket_exchange_address,Read-Only,Wallet address or username depending on platform
+polymarket_price,Read-Only,Number of trades (default 20)
+polymarket_neg_risk,Read-Only,Get current positions for a wallet/user
+polymarket_midpoints_batch,Read-Only,Wallet address or username depending on platform
+polymarket_prices_batch,Read-Only,Get P&L stats for a wallet/user
+polymarket_spreads_batch,Read-Only,Wallet address or username depending on platform
+polymarket_orderbooks_batch,Write-Action,"Get leaderboard of top traders/forecasters by profit, ROI, or accuracy"
+polymarket_last_trades_batch,Write-Action,Sort criteria
+polymarket_markets,Read-Only,Time period
+polymarket_simplified_markets,Read-Only,Number of traders (default 10)
+polymarket_sampling_markets,Read-Only,Copy a specific trade from a wallet (manual copy trading)
+polymarket_market_trades_events,Write-Action,Wallet to copy from
+polymarket_get_order,Write-Action,Trade ID to copy
+polymarket_post_orders_batch,Write-Action,"Size multiplier (0.1 = 10% of their size, 1.0 = same size)"
+polymarket_cancel_orders_batch,Write-Action,Enable automatic copy trading for a wallet
+polymarket_create_api_key,Write-Action,Wallet to auto-copy
+polymarket_derive_api_key,Read-Only,Maximum position size per trade in dollars
+polymarket_get_api_keys,Read-Only,Size multiplier (0.1 = 10% of their size)
+polymarket_delete_api_key,Write-Action,Only copy if wallet has > this win rate (0-1)
+polymarket_create_readonly_api_key,Write-Action,Disable automatic copy trading for a wallet
+polymarket_get_readonly_api_keys,Read-Only,Wallet to stop auto-copying
+polymarket_delete_readonly_api_key,Write-Action,List all wallets with auto-copy enabled and their settings
+polymarket_validate_readonly_api_key,Read-Only,Find arbitrage opportunities where YES + NO prices sum to < 1 or cross-platform price discrepancies
+polymarket_get_balance_allowance,Read-Only,Optional search query to narrow markets
+polymarket_update_balance_allowance,Write-Action,Minimum edge % to report (default 1%)
+polymarket_heartbeat,Read-Only,Max opportunities to return (default 10)
+polymarket_is_order_scoring,Write-Action,internal (YES+NO) | cross (price gaps) | both
+polymarket_are_orders_scoring,Write-Action,Minimum 24h volume filter (default 0)
+polymarket_notifications,Read-Only,Platforms to scan
+polymarket_drop_notifications,Read-Only,Compare prices for the same event across multiple platforms
+polymarket_closed_only_mode,Read-Only,Search query to find matching markets
+polymarket_orderbook_hash,Write-Action,Execute a YES+NO arbitrage trade (buy both YES and NO when sum < $1 for guaranteed profit)
+polymarket_sampling_simplified_markets,Read-Only,Market ID or slug to arbitrage
+polymarket_event,Read-Only,Size in dollars per side
+polymarket_event_by_slug,Read-Only,"Enable or disable paper trading mode. In paper mode, all trades are simulated."
+polymarket_events,Read-Only,"true to enable paper trading, false to use real money"
+polymarket_search_events,Read-Only,"Starting virtual balance (default $10,000)"
+polymarket_crypto_markets,Read-Only,Get current paper trading balance and P&L
+polymarket_event_tags,Read-Only,Get all paper trading positions
+polymarket_market_by_slug,Read-Only,Reset paper trading account to starting balance
+polymarket_market_tags,Read-Only,New starting balance
+polymarket_series,Read-Only,Get paper trading trade history and performance stats
+polymarket_series_list,Read-Only,Time period
+polymarket_tags,Read-Only,Enable or configure whale alerts for large trades
+polymarket_tag,Read-Only,Enable whale alerts
+polymarket_tag_by_slug,Read-Only,Minimum trade size to alert (in dollars)
+polymarket_tag_relations,Read-Only,Market IDs to watch (empty = all markets)
+polymarket_sports,Read-Only,Get alerts when new markets are created
+polymarket_teams,Read-Only,Enable new market alerts
+polymarket_comments,Read-Only,Categories to watch (empty = all)
+polymarket_user_comments,Read-Only,Get alerts when markets have unusual volume spikes
+polymarket_positions_value,Read-Only,Enable volume spike alerts
+polymarket_closed_positions,Read-Only,Alert when volume is X times normal (default 3)
+polymarket_pnl_timeseries,Read-Only,Buy shares on Polymarket (limit order GTC). Use polymarket_orderbook first to get the real buyPrice from /price endpoint
+polymarket_overall_pnl,Read-Only,Token ID of the outcome to buy
+polymarket_user_rank,Read-Only,"Price per share (0.01-0.99). Use buyPrice from polymarket_orderbook, NOT raw book ask."
+polymarket_leaderboard,Read-Only,Number of shares to buy
+polymarket_top_holders,Read-Only,Sell shares on Polymarket (limit order GTC). Use polymarket_orderbook first to get the real sellPrice from /price endpoi
+polymarket_user_activity,Read-Only,Token ID of the outcome to sell
+polymarket_open_interest,Read-Only,Number of shares to sell
+polymarket_live_volume,Read-Only,Price per share. Use sellPrice from polymarket_orderbook for instant fill.
+polymarket_price_history,Read-Only,"Get current Polymarket positions with live CLOB prices (buyPrice, sellPrice, midpoint) for accurate P&L tracking and sel"
+polymarket_daily_rewards,Read-Only,Cancel all open orders on Polymarket
+polymarket_market_rewards,Read-Only,Token ID to get orderbook for
+polymarket_reward_markets,Read-Only,Get USDC balance on Polymarket (available funds for trading)
+polymarket_profile,Read-Only,Cancel a specific order on Polymarket by order ID
+kalshi_buy,Write-Action,Order ID to cancel
+kalshi_sell,Write-Action,Get all open orders on Polymarket
+kalshi_positions,Read-Only,Market sell - immediately sell shares at best available bid. Sells at the real sellPrice (NOT 0.01). If size not specifi
+kalshi_search,Read-Only,Token ID to sell
+kalshi_market,Read-Only,Number of shares to sell (omit to sell all)
+kalshi_balance,Read-Only,Market buy - spend a specific USDC amount to buy shares at the real buyPrice from CLOB /price endpoint. Uses FOK (fill o
+kalshi_orders,Write-Action,Token ID to buy
+kalshi_cancel,Write-Action,"USDC amount to spend (e.g., 50 for $50)"
+kalshi_exchange_status,Read-Only,Token ID to buy
+kalshi_exchange_schedule,Read-Only,Price (0.01-0.99). Must be BELOW current ask to be maker.
+kalshi_announcements,Read-Only,Number of shares
+kalshi_orderbook,Write-Action,Token ID to sell
+kalshi_market_trades,Write-Action,Price (0.01-0.99). Must be ABOVE current bid to be maker.
+kalshi_candlesticks,Read-Only,Number of shares
+kalshi_events,Read-Only,Check if a market has trading fees. ONLY 15-minute crypto markets have taker fees (~1-1.5%). All other Polymarket market
+kalshi_event,Read-Only,Token ID to check
+kalshi_series,Read-Only,Get the midpoint price for a token (average of best bid and ask). Faster than full orderbook.
+kalshi_series_info,Read-Only,Get the bid-ask spread for a token. Shows how much slippage you might face.
+kalshi_market_order,Write-Action,Get the last trade price for a token.
+kalshi_batch_create_orders,Write-Action,"Get the tick size (minimum price increment) for a token. Returns ""0.1"", ""0.01"", ""0.001"", or ""0.0001""."
+kalshi_batch_cancel_orders,Write-Action,Get trade history for your account. Shows recent fills with prices and sizes.
+kalshi_cancel_all,Write-Action,Optional: filter by market (condition_id)
+kalshi_get_order,Write-Action,Optional: filter by token
+kalshi_amend_order,Write-Action,Cancel all orders for a specific market or token. More targeted than cancel_all.
+kalshi_decrease_order,Write-Action,Market condition_id to cancel orders for
+kalshi_queue_position,Read-Only,Optional: specific token to cancel
+kalshi_queue_positions,Read-Only,Estimate the fill price for a market order before executing. Shows expected slippage.
+kalshi_fills,Read-Only,BUY or SELL
+kalshi_settlements,Read-Only,"Amount (USDC for BUY, shares for SELL)"
+kalshi_account_limits,Read-Only,"Get detailed info about a market by condition_id. Shows all outcomes, tokens, volume, liquidity."
+kalshi_api_keys,Read-Only,Market condition ID
+kalshi_create_api_key,Write-Action,Platform (polymarket or kalshi)
+kalshi_delete_api_key,Write-Action,Token ID (Polymarket) or ticker (Kalshi)
+kalshi_fee_changes,Read-Only,Number of price levels to analyze (default: 5)
+kalshi_user_data_timestamp,Read-Only,Check if Polymarket CLOB server is up and running.
+kalshi_batch_candlesticks,Read-Only,Get Polymarket server timestamp.
+kalshi_event_metadata,Read-Only,Get your signer wallet address.
+kalshi_event_candlesticks,Read-Only,Get the USDC contract address on Polygon.
+kalshi_forecast_history,Read-Only,Get the Conditional Token Framework (CTF) contract address.
+kalshi_multivariate_events,Read-Only,Get the exchange contract address.
+kalshi_create_order_group,Write-Action,"If true, returns neg_risk exchange (for crypto markets)"
+kalshi_order_groups,Write-Action,Get the best price for a specific side (BUY or SELL).
+kalshi_order_group,Write-Action,BUY or SELL
+kalshi_order_group_limit,Write-Action,Check if a token is in a negative risk market. Use the /fee-rate endpoint to check fees — only 15-min crypto markets hav
+kalshi_order_group_trigger,Write-Action,Get midpoint prices for multiple tokens at once.
+kalshi_order_group_reset,Write-Action,Array of token IDs
+kalshi_delete_order_group,Write-Action,Get best prices for multiple tokens at once.
+kalshi_resting_order_value,Write-Action,"Array of {token_id, side} objects"
+kalshi_create_subaccount,Write-Action,Get spreads for multiple tokens at once.
+kalshi_subaccount_balances,Read-Only,Array of token IDs
+kalshi_subaccount_transfer,Write-Action,Get orderbooks for multiple tokens at once.
+kalshi_subaccount_transfers,Write-Action,Array of token IDs
+kalshi_comms_id,Read-Only,Get last trade prices for multiple tokens at once.
+kalshi_create_rfq,Write-Action,Array of token IDs
+kalshi_rfqs,Read-Only,"Get active markets (returns 25 per page, use next_cursor to paginate)."
+kalshi_rfq,Read-Only,Pagination cursor for next page
+kalshi_cancel_rfq,Write-Action,"Results per page (default 25, max 100)"
+kalshi_create_quote,Write-Action,"Get simplified market list (returns 25 per page, use next_cursor to paginate)."
+kalshi_quotes,Read-Only,Pagination cursor
+kalshi_quote,Read-Only,"Results per page (default 25, max 100)"
+kalshi_cancel_quote,Write-Action,"Get featured/trending markets (returns 25 per page, use next_cursor to paginate)."
+kalshi_accept_quote,Read-Only,Pagination cursor
+kalshi_confirm_quote,Read-Only,"Results per page (default 25, max 100)"
+kalshi_collections,Read-Only,Get trade events for a specific market.
+kalshi_collection,Read-Only,Market condition ID
+kalshi_collection_lookup,Read-Only,Get details of a specific order by ID.
+kalshi_collection_lookup_history,Read-Only,Post multiple orders at once (batch).
+kalshi_live_data,Read-Only,Array of order objects
+kalshi_live_data_batch,Read-Only,Cancel multiple orders at once by IDs.
+kalshi_milestones,Read-Only,Array of order IDs to cancel
+kalshi_milestone,Read-Only,Create a new API key for your wallet.
+kalshi_structured_targets,Read-Only,Nonce for key derivation (default 0)
+kalshi_structured_target,Read-Only,Derive existing API key if you lost credentials but have private key.
+kalshi_incentives,Read-Only,Nonce used when creating (default 0)
+kalshi_fcm_orders,Write-Action,List all your API keys.
+kalshi_fcm_positions,Read-Only,Delete your current API key.
+kalshi_search_tags,Read-Only,Create a read-only API key (can view but not trade).
+kalshi_search_sports,Read-Only,List all read-only API keys.
+manifold_bet,Read-Only,Delete a read-only API key.
+manifold_sell,Write-Action,The read-only API key to delete
+manifold_search,Read-Only,Validate a read-only API key (public endpoint).
+manifold_market,Read-Only,The read-only API key to validate
+manifold_balance,Read-Only,Get current balance and trading allowance for USDC or conditional tokens.

@@ -1,0 +1,1087 @@
+{
+  "total": 216,
+  "read_only": [
+    {
+      "tool_name": "search_markets",
+      "lane": "Read-Only",
+      "description": "Search prediction markets by keyword across all platforms. Returns top results with current prices."
+    },
+    {
+      "tool_name": "get_market",
+      "lane": "Read-Only",
+      "description": "Search query (e.g., \"Trump 2028\", \"Fed rate cut\", \"Bitcoin 100k\")"
+    },
+    {
+      "tool_name": "market_index_sync",
+      "lane": "Read-Only",
+      "description": "Optional: filter to specific platform"
+    },
+    {
+      "tool_name": "market_index_search",
+      "lane": "Read-Only",
+      "description": "Get detailed info about a specific market including all outcomes and prices"
+    },
+    {
+      "tool_name": "market_index_stats",
+      "lane": "Read-Only",
+      "description": "The market ID or slug"
+    },
+    {
+      "tool_name": "market_index_last_sync",
+      "lane": "Read-Only",
+      "description": "The platform"
+    },
+    {
+      "tool_name": "market_index_prune",
+      "lane": "Read-Only",
+      "description": "Sync market index for semantic search (Polymarket, Kalshi, Manifold, Metaculus)."
+    },
+    {
+      "tool_name": "get_portfolio",
+      "lane": "Read-Only",
+      "description": "Optional list of platforms to sync"
+    },
+    {
+      "tool_name": "get_portfolio_history",
+      "lane": "Read-Only",
+      "description": "Max markets to index per platform (default 500)"
+    },
+    {
+      "tool_name": "add_position",
+      "lane": "Read-Only",
+      "description": "Market status filter"
+    },
+    {
+      "tool_name": "list_alerts",
+      "lane": "Read-Only",
+      "description": "Minimum 24h volume threshold (best-effort per platform)"
+    },
+    {
+      "tool_name": "get_recent_news",
+      "lane": "Read-Only",
+      "description": "Minimum open interest threshold (Kalshi only)"
+    },
+    {
+      "tool_name": "search_news",
+      "lane": "Read-Only",
+      "description": "Minimum number of predictions (Metaculus only)"
+    },
+    {
+      "tool_name": "get_news_for_market",
+      "lane": "Read-Only",
+      "description": "Exclude resolved markets regardless of status filter"
+    },
+    {
+      "tool_name": "analyze_edge",
+      "lane": "Read-Only",
+      "description": "Semantic search over indexed markets."
+    },
+    {
+      "tool_name": "calculate_kelly",
+      "lane": "Read-Only",
+      "description": "Search query"
+    },
+    {
+      "tool_name": "watch_wallet",
+      "lane": "Read-Only",
+      "description": "Optional platform filter"
+    },
+    {
+      "tool_name": "unwatch_wallet",
+      "lane": "Read-Only",
+      "description": "Max results (default 10)"
+    },
+    {
+      "tool_name": "list_watched_wallets",
+      "lane": "Read-Only",
+      "description": "Max candidates to consider (default 1500)"
+    },
+    {
+      "tool_name": "get_wallet_positions",
+      "lane": "Read-Only",
+      "description": "Optional per-platform weights (overrides config)"
+    },
+    {
+      "tool_name": "get_wallet_pnl",
+      "lane": "Read-Only",
+      "description": "Get indexed market counts by platform."
+    },
+    {
+      "tool_name": "enable_auto_copy",
+      "lane": "Read-Only",
+      "description": "Prune stale indexed markets."
+    },
+    {
+      "tool_name": "disable_auto_copy",
+      "lane": "Read-Only",
+      "description": "Optional platform to prune"
+    },
+    {
+      "tool_name": "list_auto_copy",
+      "lane": "Read-Only",
+      "description": "Age in ms beyond which entries are removed"
+    },
+    {
+      "tool_name": "find_arbitrage",
+      "lane": "Read-Only",
+      "description": "Get portfolio P&L history snapshots for the user"
+    },
+    {
+      "tool_name": "compare_prices",
+      "lane": "Read-Only",
+      "description": "Only return snapshots after this timestamp (ms)"
+    },
+    {
+      "tool_name": "paper_trading_mode",
+      "lane": "Read-Only",
+      "description": "Sort order (default desc)"
+    },
+    {
+      "tool_name": "paper_balance",
+      "lane": "Read-Only",
+      "description": "Manually track a position (for platforms without API sync)"
+    },
+    {
+      "tool_name": "paper_positions",
+      "lane": "Read-Only",
+      "description": "Platform name"
+    },
+    {
+      "tool_name": "paper_reset",
+      "lane": "Read-Only",
+      "description": "Market question text"
+    },
+    {
+      "tool_name": "paper_history",
+      "lane": "Read-Only",
+      "description": "Outcome name (e.g., \"Yes\", \"No\", \"Trump\")"
+    },
+    {
+      "tool_name": "whale_alerts",
+      "lane": "Read-Only",
+      "description": "Number of shares"
+    },
+    {
+      "tool_name": "new_market_alerts",
+      "lane": "Read-Only",
+      "description": "Average entry price (0.0-1.0)"
+    },
+    {
+      "tool_name": "volume_spike_alerts",
+      "lane": "Read-Only",
+      "description": "Create a price alert for a market"
+    },
+    {
+      "tool_name": "polymarket_positions",
+      "lane": "Read-Only",
+      "description": "Threshold (0.0-1.0 for price, percentage for change)"
+    },
+    {
+      "tool_name": "polymarket_balance",
+      "lane": "Read-Only",
+      "description": "Alert ID to delete"
+    },
+    {
+      "tool_name": "polymarket_fee_rate",
+      "lane": "Read-Only",
+      "description": "Analyze potential edge by comparing market price to external models (538, CME FedWatch, polls)"
+    },
+    {
+      "tool_name": "polymarket_midpoint",
+      "lane": "Read-Only",
+      "description": "Market question"
+    },
+    {
+      "tool_name": "polymarket_spread",
+      "lane": "Read-Only",
+      "description": "Current market price (0.0-1.0)"
+    },
+    {
+      "tool_name": "polymarket_tick_size",
+      "lane": "Read-Only",
+      "description": "Calculate Kelly criterion bet sizing given edge estimate"
+    },
+    {
+      "tool_name": "polymarket_estimate_fill",
+      "lane": "Read-Only",
+      "description": "Available bankroll in dollars"
+    },
+    {
+      "tool_name": "polymarket_market_info",
+      "lane": "Read-Only",
+      "description": "Start tracking a wallet/user for real-time trade alerts. Get notified when they buy/sell."
+    },
+    {
+      "tool_name": "polymarket_health",
+      "lane": "Read-Only",
+      "description": "Optional nickname for this wallet (e.g., \"Whale #1\")"
+    },
+    {
+      "tool_name": "polymarket_server_time",
+      "lane": "Read-Only",
+      "description": "Stop tracking a wallet address"
+    },
+    {
+      "tool_name": "polymarket_get_address",
+      "lane": "Read-Only",
+      "description": "Wallet address to stop watching"
+    },
+    {
+      "tool_name": "polymarket_collateral_address",
+      "lane": "Read-Only",
+      "description": "List all wallets you are currently tracking"
+    },
+    {
+      "tool_name": "polymarket_conditional_address",
+      "lane": "Read-Only",
+      "description": "Get recent trades for a specific wallet/user"
+    },
+    {
+      "tool_name": "polymarket_exchange_address",
+      "lane": "Read-Only",
+      "description": "Wallet address or username depending on platform"
+    },
+    {
+      "tool_name": "polymarket_price",
+      "lane": "Read-Only",
+      "description": "Number of trades (default 20)"
+    },
+    {
+      "tool_name": "polymarket_neg_risk",
+      "lane": "Read-Only",
+      "description": "Get current positions for a wallet/user"
+    },
+    {
+      "tool_name": "polymarket_midpoints_batch",
+      "lane": "Read-Only",
+      "description": "Wallet address or username depending on platform"
+    },
+    {
+      "tool_name": "polymarket_prices_batch",
+      "lane": "Read-Only",
+      "description": "Get P&L stats for a wallet/user"
+    },
+    {
+      "tool_name": "polymarket_spreads_batch",
+      "lane": "Read-Only",
+      "description": "Wallet address or username depending on platform"
+    },
+    {
+      "tool_name": "polymarket_markets",
+      "lane": "Read-Only",
+      "description": "Time period"
+    },
+    {
+      "tool_name": "polymarket_simplified_markets",
+      "lane": "Read-Only",
+      "description": "Number of traders (default 10)"
+    },
+    {
+      "tool_name": "polymarket_sampling_markets",
+      "lane": "Read-Only",
+      "description": "Copy a specific trade from a wallet (manual copy trading)"
+    },
+    {
+      "tool_name": "polymarket_derive_api_key",
+      "lane": "Read-Only",
+      "description": "Maximum position size per trade in dollars"
+    },
+    {
+      "tool_name": "polymarket_get_api_keys",
+      "lane": "Read-Only",
+      "description": "Size multiplier (0.1 = 10% of their size)"
+    },
+    {
+      "tool_name": "polymarket_get_readonly_api_keys",
+      "lane": "Read-Only",
+      "description": "Wallet to stop auto-copying"
+    },
+    {
+      "tool_name": "polymarket_validate_readonly_api_key",
+      "lane": "Read-Only",
+      "description": "Find arbitrage opportunities where YES + NO prices sum to < 1 or cross-platform price discrepancies"
+    },
+    {
+      "tool_name": "polymarket_get_balance_allowance",
+      "lane": "Read-Only",
+      "description": "Optional search query to narrow markets"
+    },
+    {
+      "tool_name": "polymarket_heartbeat",
+      "lane": "Read-Only",
+      "description": "Max opportunities to return (default 10)"
+    },
+    {
+      "tool_name": "polymarket_notifications",
+      "lane": "Read-Only",
+      "description": "Platforms to scan"
+    },
+    {
+      "tool_name": "polymarket_drop_notifications",
+      "lane": "Read-Only",
+      "description": "Compare prices for the same event across multiple platforms"
+    },
+    {
+      "tool_name": "polymarket_closed_only_mode",
+      "lane": "Read-Only",
+      "description": "Search query to find matching markets"
+    },
+    {
+      "tool_name": "polymarket_sampling_simplified_markets",
+      "lane": "Read-Only",
+      "description": "Market ID or slug to arbitrage"
+    },
+    {
+      "tool_name": "polymarket_event",
+      "lane": "Read-Only",
+      "description": "Size in dollars per side"
+    },
+    {
+      "tool_name": "polymarket_event_by_slug",
+      "lane": "Read-Only",
+      "description": "Enable or disable paper trading mode. In paper mode, all trades are simulated."
+    },
+    {
+      "tool_name": "polymarket_events",
+      "lane": "Read-Only",
+      "description": "true to enable paper trading, false to use real money"
+    },
+    {
+      "tool_name": "polymarket_search_events",
+      "lane": "Read-Only",
+      "description": "Starting virtual balance (default $10,000)"
+    },
+    {
+      "tool_name": "polymarket_crypto_markets",
+      "lane": "Read-Only",
+      "description": "Get current paper trading balance and P&L"
+    },
+    {
+      "tool_name": "polymarket_event_tags",
+      "lane": "Read-Only",
+      "description": "Get all paper trading positions"
+    },
+    {
+      "tool_name": "polymarket_market_by_slug",
+      "lane": "Read-Only",
+      "description": "Reset paper trading account to starting balance"
+    },
+    {
+      "tool_name": "polymarket_market_tags",
+      "lane": "Read-Only",
+      "description": "New starting balance"
+    },
+    {
+      "tool_name": "polymarket_series",
+      "lane": "Read-Only",
+      "description": "Get paper trading trade history and performance stats"
+    },
+    {
+      "tool_name": "polymarket_series_list",
+      "lane": "Read-Only",
+      "description": "Time period"
+    },
+    {
+      "tool_name": "polymarket_tags",
+      "lane": "Read-Only",
+      "description": "Enable or configure whale alerts for large trades"
+    },
+    {
+      "tool_name": "polymarket_tag",
+      "lane": "Read-Only",
+      "description": "Enable whale alerts"
+    },
+    {
+      "tool_name": "polymarket_tag_by_slug",
+      "lane": "Read-Only",
+      "description": "Minimum trade size to alert (in dollars)"
+    },
+    {
+      "tool_name": "polymarket_tag_relations",
+      "lane": "Read-Only",
+      "description": "Market IDs to watch (empty = all markets)"
+    },
+    {
+      "tool_name": "polymarket_sports",
+      "lane": "Read-Only",
+      "description": "Get alerts when new markets are created"
+    },
+    {
+      "tool_name": "polymarket_teams",
+      "lane": "Read-Only",
+      "description": "Enable new market alerts"
+    },
+    {
+      "tool_name": "polymarket_comments",
+      "lane": "Read-Only",
+      "description": "Categories to watch (empty = all)"
+    },
+    {
+      "tool_name": "polymarket_user_comments",
+      "lane": "Read-Only",
+      "description": "Get alerts when markets have unusual volume spikes"
+    },
+    {
+      "tool_name": "polymarket_positions_value",
+      "lane": "Read-Only",
+      "description": "Enable volume spike alerts"
+    },
+    {
+      "tool_name": "polymarket_closed_positions",
+      "lane": "Read-Only",
+      "description": "Alert when volume is X times normal (default 3)"
+    },
+    {
+      "tool_name": "polymarket_pnl_timeseries",
+      "lane": "Read-Only",
+      "description": "Buy shares on Polymarket (limit order GTC). Use polymarket_orderbook first to get the real buyPrice from /price endpoint"
+    },
+    {
+      "tool_name": "polymarket_overall_pnl",
+      "lane": "Read-Only",
+      "description": "Token ID of the outcome to buy"
+    },
+    {
+      "tool_name": "polymarket_user_rank",
+      "lane": "Read-Only",
+      "description": "Price per share (0.01-0.99). Use buyPrice from polymarket_orderbook, NOT raw book ask."
+    },
+    {
+      "tool_name": "polymarket_leaderboard",
+      "lane": "Read-Only",
+      "description": "Number of shares to buy"
+    },
+    {
+      "tool_name": "polymarket_top_holders",
+      "lane": "Read-Only",
+      "description": "Sell shares on Polymarket (limit order GTC). Use polymarket_orderbook first to get the real sellPrice from /price endpoi"
+    },
+    {
+      "tool_name": "polymarket_user_activity",
+      "lane": "Read-Only",
+      "description": "Token ID of the outcome to sell"
+    },
+    {
+      "tool_name": "polymarket_open_interest",
+      "lane": "Read-Only",
+      "description": "Number of shares to sell"
+    },
+    {
+      "tool_name": "polymarket_live_volume",
+      "lane": "Read-Only",
+      "description": "Price per share. Use sellPrice from polymarket_orderbook for instant fill."
+    },
+    {
+      "tool_name": "polymarket_price_history",
+      "lane": "Read-Only",
+      "description": "Get current Polymarket positions with live CLOB prices (buyPrice, sellPrice, midpoint) for accurate P&L tracking and sel"
+    },
+    {
+      "tool_name": "polymarket_daily_rewards",
+      "lane": "Read-Only",
+      "description": "Cancel all open orders on Polymarket"
+    },
+    {
+      "tool_name": "polymarket_market_rewards",
+      "lane": "Read-Only",
+      "description": "Token ID to get orderbook for"
+    },
+    {
+      "tool_name": "polymarket_reward_markets",
+      "lane": "Read-Only",
+      "description": "Get USDC balance on Polymarket (available funds for trading)"
+    },
+    {
+      "tool_name": "polymarket_profile",
+      "lane": "Read-Only",
+      "description": "Cancel a specific order on Polymarket by order ID"
+    },
+    {
+      "tool_name": "kalshi_positions",
+      "lane": "Read-Only",
+      "description": "Market sell - immediately sell shares at best available bid. Sells at the real sellPrice (NOT 0.01). If size not specifi"
+    },
+    {
+      "tool_name": "kalshi_search",
+      "lane": "Read-Only",
+      "description": "Token ID to sell"
+    },
+    {
+      "tool_name": "kalshi_market",
+      "lane": "Read-Only",
+      "description": "Number of shares to sell (omit to sell all)"
+    },
+    {
+      "tool_name": "kalshi_balance",
+      "lane": "Read-Only",
+      "description": "Market buy - spend a specific USDC amount to buy shares at the real buyPrice from CLOB /price endpoint. Uses FOK (fill o"
+    },
+    {
+      "tool_name": "kalshi_exchange_status",
+      "lane": "Read-Only",
+      "description": "Token ID to buy"
+    },
+    {
+      "tool_name": "kalshi_exchange_schedule",
+      "lane": "Read-Only",
+      "description": "Price (0.01-0.99). Must be BELOW current ask to be maker."
+    },
+    {
+      "tool_name": "kalshi_announcements",
+      "lane": "Read-Only",
+      "description": "Number of shares"
+    },
+    {
+      "tool_name": "kalshi_candlesticks",
+      "lane": "Read-Only",
+      "description": "Number of shares"
+    },
+    {
+      "tool_name": "kalshi_events",
+      "lane": "Read-Only",
+      "description": "Check if a market has trading fees. ONLY 15-minute crypto markets have taker fees (~1-1.5%). All other Polymarket market"
+    },
+    {
+      "tool_name": "kalshi_event",
+      "lane": "Read-Only",
+      "description": "Token ID to check"
+    },
+    {
+      "tool_name": "kalshi_series",
+      "lane": "Read-Only",
+      "description": "Get the midpoint price for a token (average of best bid and ask). Faster than full orderbook."
+    },
+    {
+      "tool_name": "kalshi_series_info",
+      "lane": "Read-Only",
+      "description": "Get the bid-ask spread for a token. Shows how much slippage you might face."
+    },
+    {
+      "tool_name": "kalshi_queue_position",
+      "lane": "Read-Only",
+      "description": "Optional: specific token to cancel"
+    },
+    {
+      "tool_name": "kalshi_queue_positions",
+      "lane": "Read-Only",
+      "description": "Estimate the fill price for a market order before executing. Shows expected slippage."
+    },
+    {
+      "tool_name": "kalshi_fills",
+      "lane": "Read-Only",
+      "description": "BUY or SELL"
+    },
+    {
+      "tool_name": "kalshi_settlements",
+      "lane": "Read-Only",
+      "description": "Amount (USDC for BUY, shares for SELL)"
+    },
+    {
+      "tool_name": "kalshi_account_limits",
+      "lane": "Read-Only",
+      "description": "Get detailed info about a market by condition_id. Shows all outcomes, tokens, volume, liquidity."
+    },
+    {
+      "tool_name": "kalshi_api_keys",
+      "lane": "Read-Only",
+      "description": "Market condition ID"
+    },
+    {
+      "tool_name": "kalshi_fee_changes",
+      "lane": "Read-Only",
+      "description": "Number of price levels to analyze (default: 5)"
+    },
+    {
+      "tool_name": "kalshi_user_data_timestamp",
+      "lane": "Read-Only",
+      "description": "Check if Polymarket CLOB server is up and running."
+    },
+    {
+      "tool_name": "kalshi_batch_candlesticks",
+      "lane": "Read-Only",
+      "description": "Get Polymarket server timestamp."
+    },
+    {
+      "tool_name": "kalshi_event_metadata",
+      "lane": "Read-Only",
+      "description": "Get your signer wallet address."
+    },
+    {
+      "tool_name": "kalshi_event_candlesticks",
+      "lane": "Read-Only",
+      "description": "Get the USDC contract address on Polygon."
+    },
+    {
+      "tool_name": "kalshi_forecast_history",
+      "lane": "Read-Only",
+      "description": "Get the Conditional Token Framework (CTF) contract address."
+    },
+    {
+      "tool_name": "kalshi_multivariate_events",
+      "lane": "Read-Only",
+      "description": "Get the exchange contract address."
+    },
+    {
+      "tool_name": "kalshi_subaccount_balances",
+      "lane": "Read-Only",
+      "description": "Array of token IDs"
+    },
+    {
+      "tool_name": "kalshi_comms_id",
+      "lane": "Read-Only",
+      "description": "Get last trade prices for multiple tokens at once."
+    },
+    {
+      "tool_name": "kalshi_rfqs",
+      "lane": "Read-Only",
+      "description": "Get active markets (returns 25 per page, use next_cursor to paginate)."
+    },
+    {
+      "tool_name": "kalshi_rfq",
+      "lane": "Read-Only",
+      "description": "Pagination cursor for next page"
+    },
+    {
+      "tool_name": "kalshi_quotes",
+      "lane": "Read-Only",
+      "description": "Pagination cursor"
+    },
+    {
+      "tool_name": "kalshi_quote",
+      "lane": "Read-Only",
+      "description": "Results per page (default 25, max 100)"
+    },
+    {
+      "tool_name": "kalshi_accept_quote",
+      "lane": "Read-Only",
+      "description": "Pagination cursor"
+    },
+    {
+      "tool_name": "kalshi_confirm_quote",
+      "lane": "Read-Only",
+      "description": "Results per page (default 25, max 100)"
+    },
+    {
+      "tool_name": "kalshi_collections",
+      "lane": "Read-Only",
+      "description": "Get trade events for a specific market."
+    },
+    {
+      "tool_name": "kalshi_collection",
+      "lane": "Read-Only",
+      "description": "Market condition ID"
+    },
+    {
+      "tool_name": "kalshi_collection_lookup",
+      "lane": "Read-Only",
+      "description": "Get details of a specific order by ID."
+    },
+    {
+      "tool_name": "kalshi_collection_lookup_history",
+      "lane": "Read-Only",
+      "description": "Post multiple orders at once (batch)."
+    },
+    {
+      "tool_name": "kalshi_live_data",
+      "lane": "Read-Only",
+      "description": "Array of order objects"
+    },
+    {
+      "tool_name": "kalshi_live_data_batch",
+      "lane": "Read-Only",
+      "description": "Cancel multiple orders at once by IDs."
+    },
+    {
+      "tool_name": "kalshi_milestones",
+      "lane": "Read-Only",
+      "description": "Array of order IDs to cancel"
+    },
+    {
+      "tool_name": "kalshi_milestone",
+      "lane": "Read-Only",
+      "description": "Create a new API key for your wallet."
+    },
+    {
+      "tool_name": "kalshi_structured_targets",
+      "lane": "Read-Only",
+      "description": "Nonce for key derivation (default 0)"
+    },
+    {
+      "tool_name": "kalshi_structured_target",
+      "lane": "Read-Only",
+      "description": "Derive existing API key if you lost credentials but have private key."
+    },
+    {
+      "tool_name": "kalshi_incentives",
+      "lane": "Read-Only",
+      "description": "Nonce used when creating (default 0)"
+    },
+    {
+      "tool_name": "kalshi_fcm_positions",
+      "lane": "Read-Only",
+      "description": "Delete your current API key."
+    },
+    {
+      "tool_name": "kalshi_search_tags",
+      "lane": "Read-Only",
+      "description": "Create a read-only API key (can view but not trade)."
+    },
+    {
+      "tool_name": "kalshi_search_sports",
+      "lane": "Read-Only",
+      "description": "List all read-only API keys."
+    },
+    {
+      "tool_name": "manifold_bet",
+      "lane": "Read-Only",
+      "description": "Delete a read-only API key."
+    },
+    {
+      "tool_name": "manifold_search",
+      "lane": "Read-Only",
+      "description": "Validate a read-only API key (public endpoint)."
+    },
+    {
+      "tool_name": "manifold_market",
+      "lane": "Read-Only",
+      "description": "The read-only API key to validate"
+    },
+    {
+      "tool_name": "manifold_balance",
+      "lane": "Read-Only",
+      "description": "Get current balance and trading allowance for USDC or conditional tokens."
+    }
+  ],
+  "write_action": [
+    {
+      "tool_name": "create_alert",
+      "lane": "Write-Action",
+      "description": "Exclude sports-related markets (default true)"
+    },
+    {
+      "tool_name": "delete_alert",
+      "lane": "Write-Action",
+      "description": "Minimum liquidity threshold (best-effort per platform)"
+    },
+    {
+      "tool_name": "get_wallet_trades",
+      "lane": "Write-Action",
+      "description": "Minimum similarity score to include"
+    },
+    {
+      "tool_name": "get_top_traders",
+      "lane": "Write-Action",
+      "description": "Optional list of platforms to report"
+    },
+    {
+      "tool_name": "copy_trade",
+      "lane": "Write-Action",
+      "description": "Get the last market index sync summary."
+    },
+    {
+      "tool_name": "execute_arbitrage",
+      "lane": "Write-Action",
+      "description": "Max snapshots to return (default 200)"
+    },
+    {
+      "tool_name": "polymarket_buy",
+      "lane": "Write-Action",
+      "description": "Market name (for display)"
+    },
+    {
+      "tool_name": "polymarket_sell",
+      "lane": "Write-Action",
+      "description": "Alert condition"
+    },
+    {
+      "tool_name": "polymarket_cancel_all",
+      "lane": "Write-Action",
+      "description": "List all active alerts for the user"
+    },
+    {
+      "tool_name": "polymarket_orderbook",
+      "lane": "Write-Action",
+      "description": "Delete an alert"
+    },
+    {
+      "tool_name": "polymarket_cancel",
+      "lane": "Write-Action",
+      "description": "Get recent market-moving news"
+    },
+    {
+      "tool_name": "polymarket_orders",
+      "lane": "Write-Action",
+      "description": "Number of items (default 10)"
+    },
+    {
+      "tool_name": "polymarket_market_sell",
+      "lane": "Write-Action",
+      "description": "Search news by keyword"
+    },
+    {
+      "tool_name": "polymarket_market_buy",
+      "lane": "Write-Action",
+      "description": "Search query"
+    },
+    {
+      "tool_name": "polymarket_maker_buy",
+      "lane": "Write-Action",
+      "description": "Get news relevant to a specific market"
+    },
+    {
+      "tool_name": "polymarket_maker_sell",
+      "lane": "Write-Action",
+      "description": "The market question to find news for"
+    },
+    {
+      "tool_name": "polymarket_last_trade",
+      "lane": "Write-Action",
+      "description": "Market category for finding relevant external data"
+    },
+    {
+      "tool_name": "polymarket_trades",
+      "lane": "Write-Action",
+      "description": "Current market price (0.0-1.0)"
+    },
+    {
+      "tool_name": "polymarket_cancel_market",
+      "lane": "Write-Action",
+      "description": "Your estimated true probability (0.0-1.0)"
+    },
+    {
+      "tool_name": "orderbook_imbalance",
+      "lane": "Write-Action",
+      "description": "Wallet address (0x...) or username depending on platform"
+    },
+    {
+      "tool_name": "polymarket_orderbooks_batch",
+      "lane": "Write-Action",
+      "description": "Get leaderboard of top traders/forecasters by profit, ROI, or accuracy"
+    },
+    {
+      "tool_name": "polymarket_last_trades_batch",
+      "lane": "Write-Action",
+      "description": "Sort criteria"
+    },
+    {
+      "tool_name": "polymarket_market_trades_events",
+      "lane": "Write-Action",
+      "description": "Wallet to copy from"
+    },
+    {
+      "tool_name": "polymarket_get_order",
+      "lane": "Write-Action",
+      "description": "Trade ID to copy"
+    },
+    {
+      "tool_name": "polymarket_post_orders_batch",
+      "lane": "Write-Action",
+      "description": "Size multiplier (0.1 = 10% of their size, 1.0 = same size)"
+    },
+    {
+      "tool_name": "polymarket_cancel_orders_batch",
+      "lane": "Write-Action",
+      "description": "Enable automatic copy trading for a wallet"
+    },
+    {
+      "tool_name": "polymarket_create_api_key",
+      "lane": "Write-Action",
+      "description": "Wallet to auto-copy"
+    },
+    {
+      "tool_name": "polymarket_delete_api_key",
+      "lane": "Write-Action",
+      "description": "Only copy if wallet has > this win rate (0-1)"
+    },
+    {
+      "tool_name": "polymarket_create_readonly_api_key",
+      "lane": "Write-Action",
+      "description": "Disable automatic copy trading for a wallet"
+    },
+    {
+      "tool_name": "polymarket_delete_readonly_api_key",
+      "lane": "Write-Action",
+      "description": "List all wallets with auto-copy enabled and their settings"
+    },
+    {
+      "tool_name": "polymarket_update_balance_allowance",
+      "lane": "Write-Action",
+      "description": "Minimum edge % to report (default 1%)"
+    },
+    {
+      "tool_name": "polymarket_is_order_scoring",
+      "lane": "Write-Action",
+      "description": "internal (YES+NO) | cross (price gaps) | both"
+    },
+    {
+      "tool_name": "polymarket_are_orders_scoring",
+      "lane": "Write-Action",
+      "description": "Minimum 24h volume filter (default 0)"
+    },
+    {
+      "tool_name": "polymarket_orderbook_hash",
+      "lane": "Write-Action",
+      "description": "Execute a YES+NO arbitrage trade (buy both YES and NO when sum < $1 for guaranteed profit)"
+    },
+    {
+      "tool_name": "kalshi_buy",
+      "lane": "Write-Action",
+      "description": "Order ID to cancel"
+    },
+    {
+      "tool_name": "kalshi_sell",
+      "lane": "Write-Action",
+      "description": "Get all open orders on Polymarket"
+    },
+    {
+      "tool_name": "kalshi_orders",
+      "lane": "Write-Action",
+      "description": "Token ID to buy"
+    },
+    {
+      "tool_name": "kalshi_cancel",
+      "lane": "Write-Action",
+      "description": "USDC amount to spend (e.g., 50 for $50)"
+    },
+    {
+      "tool_name": "kalshi_orderbook",
+      "lane": "Write-Action",
+      "description": "Token ID to sell"
+    },
+    {
+      "tool_name": "kalshi_market_trades",
+      "lane": "Write-Action",
+      "description": "Price (0.01-0.99). Must be ABOVE current bid to be maker."
+    },
+    {
+      "tool_name": "kalshi_market_order",
+      "lane": "Write-Action",
+      "description": "Get the last trade price for a token."
+    },
+    {
+      "tool_name": "kalshi_batch_create_orders",
+      "lane": "Write-Action",
+      "description": "Get the tick size (minimum price increment) for a token. Returns \"0.1\", \"0.01\", \"0.001\", or \"0.0001\"."
+    },
+    {
+      "tool_name": "kalshi_batch_cancel_orders",
+      "lane": "Write-Action",
+      "description": "Get trade history for your account. Shows recent fills with prices and sizes."
+    },
+    {
+      "tool_name": "kalshi_cancel_all",
+      "lane": "Write-Action",
+      "description": "Optional: filter by market (condition_id)"
+    },
+    {
+      "tool_name": "kalshi_get_order",
+      "lane": "Write-Action",
+      "description": "Optional: filter by token"
+    },
+    {
+      "tool_name": "kalshi_amend_order",
+      "lane": "Write-Action",
+      "description": "Cancel all orders for a specific market or token. More targeted than cancel_all."
+    },
+    {
+      "tool_name": "kalshi_decrease_order",
+      "lane": "Write-Action",
+      "description": "Market condition_id to cancel orders for"
+    },
+    {
+      "tool_name": "kalshi_create_api_key",
+      "lane": "Write-Action",
+      "description": "Platform (polymarket or kalshi)"
+    },
+    {
+      "tool_name": "kalshi_delete_api_key",
+      "lane": "Write-Action",
+      "description": "Token ID (Polymarket) or ticker (Kalshi)"
+    },
+    {
+      "tool_name": "kalshi_create_order_group",
+      "lane": "Write-Action",
+      "description": "If true, returns neg_risk exchange (for crypto markets)"
+    },
+    {
+      "tool_name": "kalshi_order_groups",
+      "lane": "Write-Action",
+      "description": "Get the best price for a specific side (BUY or SELL)."
+    },
+    {
+      "tool_name": "kalshi_order_group",
+      "lane": "Write-Action",
+      "description": "BUY or SELL"
+    },
+    {
+      "tool_name": "kalshi_order_group_limit",
+      "lane": "Write-Action",
+      "description": "Check if a token is in a negative risk market. Use the /fee-rate endpoint to check fees — only 15-min crypto markets hav"
+    },
+    {
+      "tool_name": "kalshi_order_group_trigger",
+      "lane": "Write-Action",
+      "description": "Get midpoint prices for multiple tokens at once."
+    },
+    {
+      "tool_name": "kalshi_order_group_reset",
+      "lane": "Write-Action",
+      "description": "Array of token IDs"
+    },
+    {
+      "tool_name": "kalshi_delete_order_group",
+      "lane": "Write-Action",
+      "description": "Get best prices for multiple tokens at once."
+    },
+    {
+      "tool_name": "kalshi_resting_order_value",
+      "lane": "Write-Action",
+      "description": "Array of {token_id, side} objects"
+    },
+    {
+      "tool_name": "kalshi_create_subaccount",
+      "lane": "Write-Action",
+      "description": "Get spreads for multiple tokens at once."
+    },
+    {
+      "tool_name": "kalshi_subaccount_transfer",
+      "lane": "Write-Action",
+      "description": "Get orderbooks for multiple tokens at once."
+    },
+    {
+      "tool_name": "kalshi_subaccount_transfers",
+      "lane": "Write-Action",
+      "description": "Array of token IDs"
+    },
+    {
+      "tool_name": "kalshi_create_rfq",
+      "lane": "Write-Action",
+      "description": "Array of token IDs"
+    },
+    {
+      "tool_name": "kalshi_cancel_rfq",
+      "lane": "Write-Action",
+      "description": "Results per page (default 25, max 100)"
+    },
+    {
+      "tool_name": "kalshi_create_quote",
+      "lane": "Write-Action",
+      "description": "Get simplified market list (returns 25 per page, use next_cursor to paginate)."
+    },
+    {
+      "tool_name": "kalshi_cancel_quote",
+      "lane": "Write-Action",
+      "description": "Get featured/trending markets (returns 25 per page, use next_cursor to paginate)."
+    },
+    {
+      "tool_name": "kalshi_fcm_orders",
+      "lane": "Write-Action",
+      "description": "List all your API keys."
+    },
+    {
+      "tool_name": "manifold_sell",
+      "lane": "Write-Action",
+      "description": "The read-only API key to delete"
+    }
+  ]
+}
