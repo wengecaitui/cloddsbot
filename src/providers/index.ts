@@ -845,6 +845,10 @@ export class ProviderManager extends EventEmitter {
   private providers: Map<string, Provider> = new Map();
   private defaultProvider: string | null = null;
   private fallbackChain: string[] = [];
+  /** Slow provider for deep analysis (OrangeAI slow path) */
+  slowProvider: Provider | null = null;
+  /** Fast provider for quick response (OrangeAI fast path / siliconflow fallback) */
+  fastProvider: Provider | null = null;
   private circuits: Map<string, {
     failures: number;
     successes: number;
@@ -1118,11 +1122,11 @@ export const providers = new ProviderManager();
 
 // Auto-register from environment
 if (process.env.ANTHROPIC_API_KEY) {
-  providers.register(new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY }));
+  providers.register(new AnthropicProvider({ apiKey: proces..._KEY }));
 }
 
 if (process.env.OPENAI_API_KEY) {
-  providers.register(new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }));
+  providers.register(new OpenAIProvider({ apiKey: proces..._KEY }));
 }
 
 if (process.env.OLLAMA_URL) {
@@ -1143,6 +1147,65 @@ if (process.env.FIREWORKS_API_KEY) {
 
 if (process.env.GEMINI_API_KEY) {
   providers.register(new GeminiProvider(process.env.GEMINI_API_KEY));
+}
+
+// =============================================================================
+// OrangeAI 双发动机注册（快慢分道）
+// =============================================================================
+
+/** Slow path: OrangeAI 深度推理（多Agent辩论/全局判断） */
+const orangeaiSlowKey = process.env.ORANGEAI_SLOW_KEY;
+const orangeaiSlowBase = process.env.ORANGEAI_SLOW_BASE_URL || 'https://api4.orangeai.cc/v1';
+const orangeaiSlowModel = process.env.ORANGEAI_SLOW_MODEL || 'glm-5.2';
+
+if (orangeaiSlowKey) {
+  const slowProvider = new OpenAIProvider({
+    apiKey: orangeaiSlowKey,
+    baseUrl: orangeaiSlowBase,
+    defaultModel: orangeaiSlowModel,
+    maxRetries: 3,
+    timeout: 300000, // 5min for deep reasoning
+  });
+  slowProvider.name = 'orangeai-slow';
+  providers.register(slowProvider);
+  providers.slowProvider = slowProvider;
+  logger.info({ model: orangeaiSlowModel, base: orangeaiSlowBase }, 'OrangeAI slow path registered');
+}
+
+/** Fast path: OrangeAI 极速响应（信号驱动/秒级决策） */
+const orangeaiFastKey = process.env.ORANGEAI_FAST_KEY;
+const orangeaiFastBase = process.env.ORANGEAI_FAST_BASE_URL || 'https://api4.orangeai.cc/v1';
+const orangeaiFastModel = process.env.ORANGEAI_FAST_MODEL || 'glm-5.2';
+
+if (orangeaiFastKey) {
+  const fastProvider = new OpenAIProvider({
+    apiKey: orangeaiFastKey,
+    baseUrl: orangeaiFastBase,
+    defaultModel: orangeaiFastModel,
+    maxRetries: 2,
+    timeout: 5000, // 5s max for fast path
+  });
+  fastProvider.name = 'orangeai-fast';
+  providers.register(fastProvider);
+  providers.fastProvider = fastProvider;
+  logger.info({ model: orangeaiFastModel, base: orangeaiFastBase }, 'OrangeAI fast path registered');
+}
+
+/** Fallback: SiliconFlow / inferaichat / 本地模型 */
+const siliconflowKey = process.env.SILICONFLOW_API_KEY;
+if (siliconflowKey) {
+  providers.register(new OpenAIProvider({
+    apiKey: siliconflowKey,
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    defaultModel: 'deepseek-ai/DeepSeek-V4-Pro',
+  }));
+}
+
+if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY) {
+  // Set default only if we registered something
+  if (!providers.defaultProvider) {
+    providers.setDefault(orangeaiFastKey ? 'orangeai-fast' : 'anthropic');
+  }
 }
 
 export { createProviderHealthMonitor } from './health';

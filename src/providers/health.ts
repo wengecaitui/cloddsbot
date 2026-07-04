@@ -12,6 +12,10 @@ export interface ProviderHealthStatus {
   lastCheckedAt: number;
   consecutiveFailures: number;
   lastError?: string;
+  /** Measured latency in ms (0 = not checked) */
+  latencyMs?: number;
+  /** Provider lane: 'slow', 'fast', or undefined */
+  lane?: 'slow' | 'fast';
 }
 
 export interface ProviderHealthSnapshot {
@@ -57,12 +61,43 @@ export function createProviderHealthMonitor(
       const prev = statuses.get(provider);
       const consecutiveFailures = available ? 0 : (prev?.consecutiveFailures ?? 0) + 1;
 
+      // Measure latency for orangeai-slow and orangeai-fast specifically
+      let latencyMs = 0;
+      const lane: 'slow' | 'fast' | undefined =
+        provider === 'orangeai-slow' ? 'slow' :
+        provider === 'orangeai-fast' ? 'fast' : undefined;
+      if (available) {
+        try {
+          const p = providers.get(provider);
+          if (p && 'complete' in p) {
+            const start = Date.now();
+            await p.complete([
+              { role: 'user', content: 'ping' }
+            ], { model: process.env[`ORANGEAI_${lane?.toUpperCase()}_MODEL`] || undefined, maxTokens: 1 });
+            latencyMs = Date.now() - start;
+
+            // Circuit breaker: if fast path > 1.5s, log warning
+            if (lane === 'fast' && latencyMs > 1500) {
+              logger.warn({ provider, latencyMs }, 'Fast path latency exceeds 1.5s threshold — consider fallback');
+            }
+            // Slow path > 10s log warning
+            if (lane === 'slow' && latencyMs > 10000) {
+              logger.warn({ provider, latencyMs }, 'Slow path latency exceeds 10s');
+            }
+          }
+        } catch {
+          latencyMs = -1;
+        }
+      }
+
       const next: ProviderHealthStatus = {
         provider,
         available,
         lastCheckedAt: checkedAt,
         consecutiveFailures,
         lastError: available ? undefined : prev?.lastError ?? 'Unavailable',
+        latencyMs,
+        lane,
       };
 
       statuses.set(provider, next);
