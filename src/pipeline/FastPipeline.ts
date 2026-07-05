@@ -94,7 +94,7 @@ export class FastPipeline extends EventEmitter {
     }
 
     // Step 3: Risk Team 拦截（硬限制）
-    const killSwitch = (this.config.router as any).config?.killSwitch;
+    const killSwitch = this.config.router.killSwitch;
     if (killSwitch) {
       const riskCheck = killSwitch.check(signal.symbol, 0);
       if (!riskCheck.allowed) {

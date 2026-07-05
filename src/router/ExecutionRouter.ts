@@ -72,6 +72,11 @@ export class ExecutionRouter extends EventEmitter {
     this.config = config;
   }
 
+  /** 暴露 KillSwitch（供 FastPipeline / SlowPipeline 调用） */
+  get killSwitch(): KillSwitch {
+    return this.config.killSwitch;
+  }
+
   // =============================================
   // 核心路由逻辑
   // =============================================

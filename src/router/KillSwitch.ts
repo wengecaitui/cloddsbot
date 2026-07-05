@@ -11,10 +11,17 @@
 import { EventEmitter } from 'events';
 
 export interface KillSwitchConfig {
-  /** 单笔最大仓位（USD），默认 100 */
-  maxSinglePositionUsd: number;
-  /** 日最大亏损（USD），默认 500 */
-  dailyMaxLossUsd: number;
+  /** 单笔最大仓位占总仓位比例，默认 0.15 (15%) */
+  maxSinglePositionPct: number;
+  /** 当前总仓位（USD），用于计算单笔上限 = totalCapital × maxSinglePositionPct */
+  totalCapitalUsd: number;
+  /** 单笔绝对上限（USD），optional；超过此值即使比例允许也拒绝，默认 Infinity */
+  maxSinglePositionAbsUsd?: number;
+  /**
+   * 日最大亏损（USD）
+   * ⚠️ 暂未启用，测试后再加
+   */
+  dailyMaxLossUsd?: number;
   /** Write-Action 超时（秒），默认 1.5s */
   writeActionTimeoutSec: number;
   /** 是否启用 Kill Switch */
@@ -44,30 +51,40 @@ export class KillSwitch extends EventEmitter {
   constructor(config: KillSwitchConfig = {}) {
     super();
     this.config = {
-      maxSinglePositionUsd: config.maxSinglePositionUsd ?? 100,
-      dailyMaxLossUsd: config.dailyMaxLossUsd ?? 500,
+      maxSinglePositionPct: config.maxSinglePositionPct ?? 0.15,  // 15%
+      totalCapitalUsd: config.totalCapitalUsd ?? 10000,           // $10k 默认
+      maxSinglePositionAbsUsd: config.maxSinglePositionAbsUsd ?? Infinity,
+      dailyMaxLossUsd: config.dailyMaxLossUsd,                   // undefined = 暂未启用
       writeActionTimeoutSec: config.writeActionTimeoutSec ?? 1.5,
       enabled: config.enabled ?? true,
     };
+  }
+
+  /** 计算单笔上限（USD）= totalCapital × maxSinglePositionPct，再与绝对上限取 min */
+  getSinglePositionLimitUsd(): number {
+    const pctLimit = this.config.totalCapitalUsd * this.config.maxSinglePositionPct;
+    return Math.min(pctLimit, this.config.maxSinglePositionAbsUsd ?? Infinity);
   }
 
   /** 检查是否允许下单 */
   check(symbol: string, positionUsd: number): { allowed: boolean; reason?: string } {
     if (!this.config.enabled) return { allowed: true };
 
+    const limit = this.getSinglePositionLimitUsd();
+
     // 单笔上限
-    if (positionUsd > this.config.maxSinglePositionUsd) {
+    if (positionUsd > limit) {
       return {
         allowed: false,
-        reason: `KillSwitch: ${symbol} 仓位 $${positionUsd} 超过单笔上限 $${this.config.maxSinglePositionUsd}`,
+        reason: `KillSwitch: ${symbol} $${positionUsd.toFixed(0)} 超过单笔上限 $${limit.toFixed(0)} (${(this.config.maxSinglePositionPct * 100).toFixed(0)}% 总仓位)`,
       };
     }
 
-    // 日亏损上限
-    if (this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
+    // 日亏损上限（⚠️ 暂未启用，dailyMaxLossUsd = undefined 时跳过）
+    if (this.config.dailyMaxLossUsd != null && this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
       return {
         allowed: false,
-        reason: `KillSwitch: 今日亏损 $${this.dailyLossUsd} 已达上限 $${this.config.dailyMaxLossUsd}`,
+        reason: `KillSwitch: 今日亏损 $${this.dailyLossUsd.toFixed(0)} 已达上限 $${this.config.dailyMaxLossUsd.toFixed(0)}`,
       };
     }
 
@@ -77,9 +94,9 @@ export class KillSwitch extends EventEmitter {
   /** 记录亏损 */
   recordLoss(usd: number): void {
     this.dailyLossUsd += usd;
-    if (this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
+    if (this.config.dailyMaxLossUsd != null && this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
       this.isLocked = true;
-      this.emit('lock', { reason: `Daily loss $${this.dailyLossUsd} >= $${this.config.dailyMaxLossUsd}` } as { reason: string });
+      this.emit('lock', { reason: `Daily loss $${this.dailyLossUsd.toFixed(0)} >= $${this.config.dailyMaxLossUsd.toFixed(0)}` });
     }
   }
 
@@ -103,7 +120,7 @@ export class KillSwitch extends EventEmitter {
       todayRealizedLossUsd: this.dailyLossUsd,
       todayUnrealizedLossUsd: 0,
       openPositions: 0,
-      isTriggered: this.isLocked as boolean,
+      isTriggered: Boolean(this.isLocked),
       triggerReason: this.isLocked ? 'Daily loss limit reached' : undefined,
     };
   }
