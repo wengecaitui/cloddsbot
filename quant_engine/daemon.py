@@ -11,6 +11,16 @@ Phase 4.3: 增加 JSON Schema 协议校验
 
 import sys
 import os
+import os.path as _path
+_sys_path_anchor = _path.dirname(_path.abspath(__file__))
+if _sys_path_anchor not in sys.path:
+    sys.path.insert(0, _sys_path_anchor)
+
+_sys_path_parent = os.path.dirname(_sys_path_anchor)
+if _sys_path_parent not in sys.path:
+    sys.path.insert(0, _sys_path_parent)
+
+import os
 import json
 import traceback
 import pandas as pd
@@ -25,7 +35,7 @@ except Exception:
     pass
 
 # ─── 协议 Schema 加载 ──────────────────────────────────────────────────────
-SCHEMA_PATH = "docs/protocol-schema.json"
+SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "protocol-schema.json")
 PROTOCOL_SCHEMA: Dict[str, Any] = {}
 if os.path.exists(SCHEMA_PATH):
     with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
@@ -251,6 +261,14 @@ P0_INDICATORS = {
     "UTBotAlerts": calc_ut_bot_alerts,
 }
 
+# 导入 P1
+from quant_engine.indicators import P1_INDICATORS
+
+# 合并 P0 + P1 指标生成完整分发器
+INDICATOR_DISPATCH = {}
+INDICATOR_DISPATCH.update(P0_INDICATORS)
+INDICATOR_DISPATCH.update(P1_INDICATORS)
+
 
 # ─── PING/PONG 握手 ─────────────────────────────────────────────────────────
 
@@ -261,6 +279,12 @@ def handle_ping(cid: str) -> Dict:
 # ─── 主循环 ────────────────────────────────────────────────────────────────
 
 def main():
+    # 启动时主动发送 PONG，让 TS 端知道 daemon 已就绪
+    try:
+        write_response({"type": "PONG", "correlationId": "boot", "status": "READY"})
+    except Exception:
+        pass
+
     while True:
         try:
             raw = sys.__stdin__.readline()
@@ -352,10 +376,10 @@ def handle_calc(packet: Dict) -> Dict[str, Any]:
         name = ind.get("name", "")
         params = ind.get("params", {})
 
-        if name in P0_INDICATORS:
-            results[name] = P0_INDICATORS[name](df, params)
+        if name in INDICATOR_DISPATCH:
+            results[name] = INDICATOR_DISPATCH[name](df, params)
         else:
-            results[name] = {"error": f"指标 {name} 未在 P0 批次中实现，等待 Phase 4.5"}
+            results[name] = {"error": f"指标 {name} 未实现"}
 
     return results
 

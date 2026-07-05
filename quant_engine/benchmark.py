@@ -103,9 +103,11 @@ class DaemonManager:
             try:
                 self.process.stdin.close()
                 self.process.terminate()
-                self.process.wait(timeout=2)
-            except:
-                self.process.kill()
+                self.process.wait(timeout=5)
+                if self.process.poll() is None:
+                    self.process.kill()
+            except Exception as e:
+                print(f"  ⚠️  daemon 关闭异常: {e}")
 
 
 # ─── 压测逻辑 ───────────────────────────────────────────────────────────────
