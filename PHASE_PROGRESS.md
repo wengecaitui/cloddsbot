@@ -275,8 +275,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `src/router/PythonBridgeDaemon.ts` — TS 端桥接器
 
 **Phase 4.4 子项**：
-- [x] 4.4a Baseline 测定 → P99 = 738ms（含冷启动）
-- [x] 4.4b 热路径修正 → P99 = 11ms ✅ **通过**
-- [x] 4.4c 并发验证 → 10/50/100/200 全绿
-- [x] 4.4d 报告 + 归档
+- [x] 4.4a Baseline 测定 → 冷启动 + PONG 握手 = 672.8ms（一次性，不计入热路径）
+- [x] 4.4b 热路径修正 → P99 = 13.78ms ✅ **通过**（< 50ms 阈值）
+- [x] 4.4c 并发验证 → 10/50/100/200 全绿（P99 稳定 9-13ms）
+- [x] 4.4d 报告 + 归档 → JSON + Markdown 文档已存
+
+**下一阶段**：Phase 4.5 P1 批次指标迁移已完成（4 个指标模块就位），下一步进入 P2 批次（Strict_Lag_Offset）
 
