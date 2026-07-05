@@ -81,3 +81,14 @@ CLAWDBOT_ARCHITECTURE.md
 # Standalone compute API server (monetization layer — hosted only)
 src/api/
 .vercel
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+.env
+.venv
