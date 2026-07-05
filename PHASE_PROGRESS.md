@@ -62,11 +62,25 @@
 **Phase 4.4b 触发条件:**
 - P99 > 50ms → 立即引入 `PythonBridgeDaemonPool.ts`（进程池轮询）
 
-## Phase 4.5 — 指标迁移批次 ⏳ (待开始)
-**P0** ✅ (已内置 daemon.py)
-- P1: STC / Stochastic / Mean Reversion / Trend Impulse / Volume Profile
-- P2: DeltaFlow Volume Profile / Elliott Wave / Fibonacci / S-R (需 Strict_Lag_Offset)
-- P3: Comprehensive Toolkit / TradeIQ
+## Phase 4.5 — 指标迁移批次 ✅ 完成（10/14）
+**P0** ✅ (3/3，已内置 daemon.py)
+- HullSuite / ChandelierExit / UTBotAlerts
+
+**P1** ✅ (4/5)
+- STC / StochasticOverlay / MeanReversion / TrendImpulse
+- ~~Volume Profile~~ ❌ 放弃 (2026-07-05 议会裁决: skip_VP 3.5/3.5)
+
+**P2** ✅ (4/4 — Strict_Lag_Offset)
+| 指标 | lag_bars | 备注 |
+|------|----------|------|
+| DeltaFlow | 5 | pivot 滞后偏移 |
+| ElliottWave | 5 | pivot 滞后偏移 |
+| FibonacciEntryBands | 5 | swing pivot ± 比例 |
+| SRRange | 3 | swing pivot 簇 + ATR |
+
+**当前 daemon INDICATOR_DISPATCH**: 11 个指标（P0:3 + P1:4 + P2:4）
+
+**P3 待迁移**（4 个）: Comprehensive Toolkit / TradeIQ / ...
 
 ## Phase 4.6 — 精度基准测试 ⏳ (待开始)
 **⚠️ 修正：拒绝鸵鸟策略（2026-07-05 审计修正）**
@@ -101,6 +115,12 @@ TTL 缓存只用于：历史归档数据（如 7 天前的指标）
 ## Phase 8 — 执行层 ⏳ (待开始)
 ## Phase 9 — 性能优化 ⏳ (待开始)
 ## Phase 10 — 验证 ⏳ (待开始)
+
+**Volume Profile 议会裁决**（Quick Mode, 2026-07-05）：
+- 议员：Aristotle + Ada Lovelace（域权重席 1.5×） + Feynman
+- 投票：skip_VP — 3.5/3.5 (100%) ✅ 共识达成
+- 少数派报告：Ada 反对任何 OHLCV 近似版（dealmaker: yes）
+- 具体下一步：直接开始 P2 批次 4 个指标
 
 ---
 # Changelog

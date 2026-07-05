@@ -1,0 +1,57 @@
+{
+  "ChandelierExit": {
+    "status": "OK",
+    "lag_bars": 0,
+    "signal": "SHORT"
+  },
+  "DeltaFlow": {
+    "status": "OK",
+    "lag_bars": 5,
+    "signal": "SELL"
+  },
+  "ElliottWave": {
+    "status": "OK",
+    "lag_bars": 5,
+    "signal": "HOLD"
+  },
+  "FibonacciEntryBands": {
+    "status": "OK",
+    "lag_bars": 5,
+    "signal": "HOLD"
+  },
+  "HullSuite": {
+    "status": "ERR:数据不足，需要 205 根 K 线",
+    "lag_bars": "?",
+    "signal": "-"
+  },
+  "MeanReversion": {
+    "status": "OK",
+    "lag_bars": 0,
+    "signal": "BUY"
+  },
+  "SRRange": {
+    "status": "OK",
+    "lag_bars": 3,
+    "signal": "BEARISH"
+  },
+  "STC": {
+    "status": "OK",
+    "lag_bars": 0,
+    "signal": "HOLD"
+  },
+  "StochasticOverlay": {
+    "status": "OK",
+    "lag_bars": 0,
+    "signal": "WATCH"
+  },
+  "TrendImpulse": {
+    "status": "OK",
+    "lag_bars": 0,
+    "signal": "BEAR"
+  },
+  "UTBotAlerts": {
+    "status": "OK",
+    "lag_bars": 0,
+    "signal": "HOLD"
+  }
+}

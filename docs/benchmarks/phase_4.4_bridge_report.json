@@ -1,0 +1,78 @@
+{
+  "test": "phase_4.4_bridge_benchmark",
+  "timestamp": "2026-07-05T22:44:00",
+  "methodology": "daemon 常驻（一次 spawn + 预热 + 复用 stdin/stdout）",
+  "cold_start_ms": 672.8,
+  "warmup_count": 5,
+  "results": [
+    {
+      "level": 10,
+      "requests": 50,
+      "success": 50,
+      "failed": 0,
+      "p50_ms": 9.3,
+      "p95_ms": 10.4,
+      "p99_ms": 11.0,
+      "avg_ms": 9.5,
+      "throughput_req_s": 46
+    },
+    {
+      "level": 50,
+      "requests": 50,
+      "success": 50,
+      "failed": 0,
+      "p50_ms": 9.0,
+      "p95_ms": 10.1,
+      "p99_ms": 10.7,
+      "avg_ms": 9.0,
+      "throughput_req_s": 48
+    },
+    {
+      "level": 100,
+      "requests": 50,
+      "success": 50,
+      "failed": 0,
+      "p50_ms": 9.0,
+      "p95_ms": 10.5,
+      "p99_ms": 10.8,
+      "avg_ms": 9.3,
+      "throughput_req_s": 47
+    },
+    {
+      "level": 100,
+      "requests": 50,
+      "success": 50,
+      "failed": 0,
+      "p50_ms": 11.1,
+      "p95_ms": 12.1,
+      "p99_ms": 12.5,
+      "avg_ms": 11.3,
+      "throughput_req_s": 43
+    },
+    {
+      "level": 200,
+      "requests": 50,
+      "success": 50,
+      "failed": 0,
+      "p50_ms": 9.0,
+      "p95_ms": 10.0,
+      "p99_ms": 10.3,
+      "avg_ms": 9.3,
+      "throughput_req_s": 47
+    }
+  ],
+  "final_hot_path": {
+    "requests": 100,
+    "success": 100,
+    "p50_ms": 12.11,
+    "p95_ms": 13.41,
+    "p99_ms": 13.78,
+    "max_ms": 14.03,
+    "avg_ms": 12.18,
+    "throughput_req_s": 81,
+    "cold_start_ms": 672.8
+  },
+  "verdict": "PASS",
+  "threshold_p99_ms": 50,
+  "conclusion": "热路径 P99 = 13.78ms < 50ms 阈值，Phase 4.4 通过。不触发 Phase 4.4b 进程池改造。"
+}

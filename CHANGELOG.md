@@ -64,7 +64,8 @@
 
 ## Phase 4.5 — 指标迁移批次 ⏳ (待开始)
 **P0** ✅ (已内置 daemon.py)
-- P1: STC / Stochastic / Mean Reversion / Trend Impulse / Volume Profile
+- P1: STC / Stochastic / Mean Reversion / Trend Impulse ✅
+  ⚠️ Volume Profile → 跳过 (等 Phase 5 Tick 数据层，议会裁决: skip_VP 3.5/3.5)
 - P2: DeltaFlow Volume Profile / Elliott Wave / Fibonacci / S-R (需 Strict_Lag_Offset)
 - P3: Comprehensive Toolkit / TradeIQ
 

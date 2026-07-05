@@ -1,0 +1,14 @@
+{
+  "timestamp": "2025-07-05T12:00:00Z",
+  "test": "phase_4.4_baseline",
+  "loads": 50,
+  "P50_ms": 685.2,
+  "P90_ms": 709.2,
+  "P95_ms": 721.6,
+  "P99_ms": 738.5,
+  "max_ms": 738.5,
+  "avg_ms": 687.6,
+  "decided": "NEEDS_OPT",
+  "target_p99_ms": 50,
+  "notes": "RTT=720ms baseline; daemon.py constant across all runs; GIL enabled"
+}
