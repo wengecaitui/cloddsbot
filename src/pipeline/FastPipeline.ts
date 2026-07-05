@@ -82,6 +82,19 @@ export class FastPipeline extends EventEmitter {
       };
     }
 
+    // Step 1b: 僵尸报告检测（防止 SlowPipeline 挂掉后快路径盲目交易）
+    const reportAgeMs = Date.now() - biasReport.updatedAt;
+    const maxAgeMs = this.config.router.getConfig().maxBiasReportAgeHours * 60 * 60 * 1000;
+    if (reportAgeMs > maxAgeMs) {
+      return {
+        decision: 'defense',
+        symbol: signal.symbol,
+        reason: `Stale MarketBiasReport: ${Math.round(reportAgeMs / 3600000)}h > ${this.config.router.getConfig().maxBiasReportAgeHours}h — KillSwitch activated`,
+        elapsedMs: Date.now() - startTime,
+        biasReport,
+      };
+    }
+
     // Step 2: 检查白名单
     if (!biasReport.whitelist.includes(signal.symbol)) {
       return {

@@ -9,6 +9,8 @@
 export interface MarketBiasReport {
   /** 报告生成时间戳（毫秒） */
   timestamp: number;
+  /** 报告最后更新时间戳（毫秒）— 用于过期检测，防止僵尸报告 */
+  updatedAt: number;
   /** 全局市场偏向：bullish | bearish | neutral */
   globalBias: 'bullish' | 'bearish' | 'neutral';
   /** 综合置信度 0-100 */

@@ -51,6 +51,7 @@ export class SlowPipeline extends EventEmitter {
       const now = Date.now();
       const report: MarketBiasReportFull = {
         timestamp: now,
+        updatedAt: now,  // 和 timestamp 同步，防止僵尸报告误判
         globalBias: 'neutral',
         confidence: 50,
         assets: [
@@ -92,7 +93,9 @@ export class SlowPipeline extends EventEmitter {
         },
       };
 
-      this.config.router.updateBiasReport(report);
+      this.config.router.updateBiasReport(report).catch(() => {
+        // ignore — bias_updated event already emitted, disk write is best-effort
+      });
       this.emit('run_complete', { report, durationMs: Date.now() - startTime });
       return report;
     } finally {

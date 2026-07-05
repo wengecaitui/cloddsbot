@@ -129,10 +129,34 @@ export class ExecutionRouter extends EventEmitter {
 
   /**
    * 更新 MarketBiasReport（由慢路径写入）
+   * 同时原子写入磁盘（防 I/O 竞态）
    */
-  updateBiasReport(report: MarketBiasReportFull): void {
+  async updateBiasReport(report: MarketBiasReportFull): Promise<void> {
     this.biasReport = report;
     this.emit('bias_updated', { report, ageHours: 0 });
+
+    // 原子写入磁盘（SlowPipeline → ReportStore）
+    try {
+      const { ReportStore } = await import('./store/ReportStore');
+      const store = new ReportStore();
+      await store.write(report);
+    } catch (err) {
+      // 磁盘写入失败不影响内存流程
+      this.emit('bias_write_error', { error: err });
+    }
+  }
+
+  /**
+   * 从磁盘读取 MarketBiasReport（FastPipeline 启动时或内存为空时调用）
+   */
+  async loadBiasReportFromDisk(): Promise<MarketBiasReportFull | null> {
+    try {
+      const { ReportStore } = await import('./store/ReportStore');
+      const store = new ReportStore();
+      return store.read<MarketBiasReportFull>();
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -143,11 +167,13 @@ export class ExecutionRouter extends EventEmitter {
   }
 
   /**
-   * 检查 MarketBiasReport 是否过期
+   * 检查 MarketBiasReport 是否过期（僵尸报告检测）
+   * 使用 updatedAt 而非 timestamp，防止 SlowPipeline 挂掉后快路径拿到过期报告盲目交易
    */
   private isBiasReportStale(): boolean {
     if (!this.biasReport) return true;
-    const ageHours = (Date.now() - this.biasReport.timestamp) / (1000 * 60 * 60);
+    const ageMs = Date.now() - this.biasReport.updatedAt;
+    const ageHours = ageMs / (1000 * 60 * 60);
     return ageHours > this.config.maxBiasReportAgeHours;
   }
 
