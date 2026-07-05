@@ -1,0 +1,103 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "protocol_version": "1.0.0",
+  "description": "CloddsBot TS ↔ Python 跨语言管道协议规范",
+  "message_types": {
+    "PING": {
+      "description": "握手检测请求",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "PING" },
+          "correlationId": { "type": "string", "description": "请求唯一 ID" }
+        },
+        "required": ["type", "correlationId"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "PONG" },
+          "correlationId": { "type": "string" },
+          "status": { "const": "READY" }
+        },
+        "required": ["type", "correlationId", "status"]
+      }
+    },
+    "CALC": {
+      "description": "指标计算请求",
+      "request": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "CALC" },
+          "correlationId": { "type": "string" },
+          "asset": { "type": "string", "description": "交易对符号" },
+          "series": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["open", "high", "low", "close", "volume"],
+              "properties": {
+                "open": { "type": "number" },
+                "high": { "type": "number" },
+                "low": { "type": "number" },
+                "close": { "type": "number" },
+                "volume": { "type": "number" }
+              }
+            }
+          },
+          "indicators": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "properties": {
+                "name": { "type": "string" },
+                "params": { "type": "object" }
+              }
+            }
+          }
+        },
+        "required": ["type", "correlationId", "asset", "series", "indicators"]
+      },
+      "response": {
+        "type": "object",
+        "properties": {
+          "type": { "const": "CALC_RES" },
+          "correlationId": { "type": "string" },
+          "status": { "const": "SUCCESS" },
+          "asset": { "type": "string" },
+          "data": {
+            "type": "object",
+            "description": "各指标计算结果，key 为指标名称"
+          }
+        },
+        "required": ["type", "correlationId", "status", "asset", "data"]
+      }
+    }
+  },
+  "error_response": {
+    "description": "通用错误响应",
+    "type": "object",
+    "properties": {
+      "type": { "type": "string" },
+      "correlationId": { "type": "string" },
+      "status": { "enum": ["FAILED", "PARSE_ERR", "FATAL", "UNKNOWN"] },
+      "error": { "type": "string" },
+      "traceback": { "type": "string" }
+    },
+    "required": ["type", "correlationId", "status", "error"]
+  },
+  "transport": {
+    "encoding": "utf-8",
+    "format": "jsonl",
+    "line_terminator": "\\n",
+    "max_line_length": 1048576
+  },
+  "timeouts": {
+    "PING": 1000,
+    "CALC": 2000,
+    "default": 5000
+  }
+}
