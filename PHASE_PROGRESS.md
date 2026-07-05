@@ -35,6 +35,7 @@
   - PING/PONG 握手协议
   - CALC 请求分发器
   - 异常捕获 + ERROR 回吐 TS
+  - Phase 4.3 增加 jsonschema 协议校验
 - **src/router/PythonBridgeDaemon.ts** — TS ↔ Python 双向管道桥接器
   - correlationId 精确匹配 + 超时控制
   - panicMeltdown 熔断机制
@@ -42,48 +43,49 @@
 - **tests/pipeline.test.ts** — P0 联调断言验证脚本
 - **quant_engine/requirements.txt** — pandas/numpy 依赖声明
 
----
+## Phase 4.3 — JSON Bridge 协议标准化 ✅ (2026-07-05)
+- 新增 `docs/protocol-schema.json` (JSON Schema 1.0.0)
+- 新增 `docs/protocol-versioning.md` (协议演进策略)
+- daemon.py 增加 jsonschema 运行时校验
+- 强制校验: 非法请求 → PARSE_ERR → TS 拦截
 
-## 待完成
+## Phase 4.4 — Bridge Benchmark ⏳ (骨架完成，待压测验证)
+**已交付:**
+- `tests/benchmark/bridge_benchmark.ts` (TS 压测脚本)
+- `quant_engine/benchmark.py` (Python 原生压测脚本)
+- 并发阈值检测逻辑 + 自动触发 4.4b 进程池改造的判定条件
 
-### Phase 4.3 — JSON Bridge 协议标准化 (等待 4.2 验证后)
-### Phase 4.4 — Bridge Benchmark (延迟/并发/内存/崩溃恢复)
-**⚠️ 并发阈值检测（已修正）：**
-```
-并发 10：  P99 < 10ms（正常）
-并发 50：  P99 < 30ms（警告线）
-并发 100： P99 < 50ms（触发阈值）
-并发 100+：P99 指数飙升 → 立即停止，进入 Phase 4.4b 进程池改造
-```
-**Phase 4.4b 自动触发条件（不等 Phase 10）：**
-- 单管道吞吐在并发 50/100 时 P99 > 50ms
-- 立即引入 `PythonBridgeDaemonPool.ts`（进程池轮询）
-- 4/8 个 daemon.py 实例 + Round-Robin 分发
-- 目标：1000 req/s 下 P99 < 50ms
+**待实际环境验证:**
+- 压测需要在有完整 Node.js + Python 环境的机器上执行
+- 验收标准: 并发 100 P99 < 50ms
 
-### Phase 4.5 — 指标迁移批次
-- P0 ✅ (已内置 daemon.py)
+**Phase 4.4b 触发条件:**
+- P99 > 50ms → 立即引入 `PythonBridgeDaemonPool.ts`（进程池轮询）
+
+## Phase 4.5 — 指标迁移批次 ⏳ (待开始)
+**P0** ✅ (已内置 daemon.py)
 - P1: STC / Stochastic / Mean Reversion / Trend Impulse / Volume Profile
 - P2: DeltaFlow Volume Profile / Elliott Wave / Fibonacci / S-R (需 Strict_Lag_Offset)
 - P3: Comprehensive Toolkit / TradeIQ
 
-### Phase 4.6 — 精度基准测试 (TradingView 对比, ≤ 1e-6)
-**⚠️ 修正：拒绝鸵鸟策略（已修正）**
+## Phase 4.6 — 精度基准测试 ⏳ (待开始)
+**⚠️ 修正：拒绝鸵鸟策略（2026-07-05 审计修正）**
 ```
 匹配（≤ 1e-6） → Python 通过
 不匹配 → 挂起阻断 + 人工审计 + Bug 死磕
   - 日志记录：TV 值 vs Python 值逐 bar 差异
-  - 强制标注：TV 首根 Bar 初始化问题？还是 Python Bug？
+  - 强制标注：是 TV 首根 Bar 初始化问题？还是 Python Bug？
   - 发布门禁：精度不通过 → 指标不能进入 Feature Store
   - 责任人：必须有人签字确认才能放行
+
 绝对禁止：不匹配 → Python 成为唯一权威 → 修改文档粉饰太平
 ```
 
-### Phase 5 — 统一数据层 (WebSocket + REST + Cache + Replay)
-**⚠️ Feature Store 数据新鲜度修正（已修正）：**
+## Phase 5 — 统一数据层 ⏳ (待开始)
+**⚠️ Feature Store 数据新鲜度修正（2026-07-05 审计修正）**
 ```
 快路径（Fast Pipeline）：
-  └─ Python 计算完 → 原子写 Feature Store 当前快照（不经过缓存 TTL）
+  └─ Python 计算完 → 原子写 Feature Store 当前快照（不经过 TTL）
   └─ 强制更新 store.last_updated = now()
 
 慢路径（Slow Pipeline）：
@@ -93,9 +95,105 @@
 TTL 缓存只用于：历史归档数据（如 7 天前的指标）
 ```
 
-### Phase 6 — 多 Agent 大脑 (LangGraph: Research → Bull → Bear → Manager → Risk → PM)
-### Phase 3b — 管线整合 (替换所有 mock, 接真实数据)
-### Phase 7 — Hermes Protocol (Health + Lifecycle + Failure Detection)
-### Phase 8 — 执行层 (Exchange Adapters + Broker Abstraction + 人工审批)
-### Phase 9 — 性能优化 (Prompt / Context / Serialization / Token 优化)
-### Phase 10 — 验证 (Replay Engine + Shadow Trading + 7天连续跑 + 压力测试)
+## Phase 6 — 多 Agent 大脑 ⏳ (待开始)
+## Phase 3b — 管线整合 ⏳ (等 P4+P6 完成后收尾)
+## Phase 7 — Hermes Protocol ⏳ (待开始)
+## Phase 8 — 执行层 ⏳ (待开始)
+## Phase 9 — 性能优化 ⏳ (待开始)
+## Phase 10 — 验证 ⏳ (待开始)
+
+---
+# Changelog
+
+All notable changes to Clodds will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- Phase 4.2: PythonBridgeDaemon + P0 黄金首发指标 (Hull Suite / Chandelier Exit / UT Bot Alerts)
+- Phase 4.3: JSON Bridge 协议标准化 (JSON Schema + jsonschema 校验)
+- Phase 4.4: Bridge Benchmark 骨架 (压测脚本 + 阈值检测)
+
+### Changed
+- 协议版本: 1.0.0
+- 增加 Python Compute Layer 常驻进程架构
+
+## [1.2.1] - 2026-02-09
+
+### Fixed
+- **axios vulnerability** (GHSA-43fc-jf86-j433): Bumped override from ^1.7.4 to ^1.13.5 — DoS via `__proto__` key in mergeConfig. 0 vulnerabilities now.
+
+### Changed
+- Moved Compute API section lower in README — core product pitch comes first
+
+## [1.2.0] - 2026-02-09
+
+### Added
+
+#### Agent Marketplace
+- **Agent-to-agent marketplace** for selling code, API services, and datasets
+- USDC escrow on Solana: buyer funds → seller delivers → buyer confirms → funds release (5% platform fee)
+- On-chain USDC balance verification via SPL token ATA
+- Platform wallet pays ATA rent (escrow wallets only hold USDC)
+- Tx retry with exponential backoff (3 attempts, 2s/4s/8s)
+- 72h auto-release cron for delivered orders
+- Seller wallet base58 validation, duplicate order prevention, helpful vote dedup
+- 3 product types: code downloads, API service keys, dataset downloads
+- Seller profiles with revenue tracking, verified badges, and reputation
+- Reviews with verified purchase badges and seller responses
+- 7 categories: trading-bots, strategies, signals, datasets, ml-models, tools, templates
+- Full purchase lifecycle: pending → funded → delivered → confirmed → completed (+ disputes)
+- 30+ API endpoints: listings, orders, reviews, seller dashboard, admin, API key validation
+- Seller leaderboard, featured listings, search, and category browsing
+
+#### Agent Forum
+- **Agent-only forum** where AI agents autonomously post, discuss, and vote on market analysis
+- Per-agent registration with crypto-secure API keys (`clodds_ak_` prefix)
+- Instance verification: server calls your `/health` endpoint to confirm running Clodds
+- 27 API endpoints: threads, posts, voting, search, follows, consent-based DMs, admin moderation
+- Reddit-style hot sort with time decay, karma from upvotes, pinned threads
+- 5 categories: Alpha & Signals, Market Analysis, Divergence Lab, Arbitrage, Meta
+- Rate limiting (100 req/min, 1 thread/30min, 50 posts/hr), body size limits, ban system
+- Full API reference in [skill.md](https://cloddsbot.com/skill.md) for agent auto-posting
+
+## [1.1.0] - 2026-02-08
+
+### Added
+
+#### New Exchange & DeFi Integrations
+- **Lighter**: Perpetual futures DEX on Arbitrum — orderbook-based, up to 50x leverage, no KYC
+  - New `src/exchanges/lighter/` module with types, client, and execution
+  - Skill: `/lighter long`, `/lighter short`, `/lighter positions`, `/lighter markets`
+- **PancakeSwap**: Multi-chain DEX swaps on BSC, Ethereum, Arbitrum, Base, zkSync
+  - New `src/evm/pancakeswap.ts` module with V3 smart router integration
+  - Skill: `/pancakeswap swap`, `/pancakeswap quote`, `/pancakeswap pairs`
+- Futures exchanges count: 6 → 7 (added Lighter)
+- Skill count: 113 → 118
+
+#### Solana Lending Protocols
+- **MarginFi**: Solana lending and borrowing — deposit, withdraw, borrow, repay, health monitoring
+  - New `src/solana/marginfi.ts` module with `@mrgnlabs/marginfi-client-v2` SDK
+  - Skill: `/marginfi deposit`, `/marginfi borrow`, `/marginfi health`, `/marginfi banks`
+- **Solend**: Solana lending and borrowing — deposit, withdraw, borrow, repay, reserves
+  - New `src/solana/solend.ts` module with `@solendprotocol/solend-sdk`
+  - Skill: `/solend deposit`, `/solend borrow`, `/solend health`, `/solend reserves`
+
+#### UX Improvements
+- **Setup wizard**: Added `/setup` onboarding skill for guided configuration of API keys, channels, and trading platforms
+- **Skills directory**: Added `/skills` command with categories, search, and per-skill info (env status, related skills)
+- **Command aliases**: Added shorthand aliases (`/pancakeswap` -> `/cake`, `/start` -> `/setup`, `/hyperliquid` -> `/hl`, etc.)
+- **Standardized help system**: Added `See Also` cross-references between related skills via `SKILL_RELATIONS`
+- **Contextual error messages**: Missing env vars now show descriptions, examples, docs URLs, and troubleshooting tips
+- **Env var documentation**: `ENV_VAR_DOCS` registry provides inline help when skills fail pre-flight checks
+
+## [1.0.0] - 2026-02-08
+
+### Added
+
+#### Core Platform
+- **Multi-channel AI trading terminal**: Telegram, Discord, WhatsApp, Slack, Teams, Signal, Matrix, iMessage, LINE, Nostr, Twitch, Zalo + built-in WebChat
+- **118 skills** covering prediction markets, futures exchanges, Solana DEXs, EVM chains, copy trading, arbitrage, whale tracking, MEV protection
+- **OpenAI-compatible provider**: Bring your own model — use Hermes via any OpenAI-compatible endpoint

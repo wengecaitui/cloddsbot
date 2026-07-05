@@ -1122,11 +1122,11 @@ export const providers = new ProviderManager();
 
 // Auto-register from environment
 if (process.env.ANTHROPIC_API_KEY) {
-  providers.register(new AnthropicProvider({ apiKey: proces..._KEY }));
+  providers.register(new AnthropicProvider({ apiKey: process.env.ANTHROPIC_API_KEY! }));
 }
 
 if (process.env.OPENAI_API_KEY) {
-  providers.register(new OpenAIProvider({ apiKey: proces..._KEY }));
+  providers.register(new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY! }));
 }
 
 if (process.env.OLLAMA_URL) {
