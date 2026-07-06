@@ -1,0 +1,33 @@
+{
+  "indicator": "SRRange",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "resistance": 97.2753,
+    "support": 95.7614,
+    "midpoint": 96.5183,
+    "atr": 0.5952,
+    "atr_multiplier": 1.0,
+    "signal": "BEARISH",
+    "position": "LONG",
+    "strict_lag_offset": 3,
+    "sr_levels": {
+      "resistances": [
+        {
+          "price": 97.2753,
+          "bar": 192,
+          "strength": "FRESH"
+        }
+      ],
+      "supports": [
+        {
+          "price": 95.7614,
+          "bar": 193,
+          "strength": "FRESH"
+        }
+      ]
+    }
+  },
+  "tv_values": null,
+  "comparison": null
+}

@@ -1,0 +1,15 @@
+{
+  "indicator": "ElliottWave",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "pivot_count": 23,
+    "recent_pattern": "L-H-H-L",
+    "wave_pattern": "UNCLEAR",
+    "trend": "NEUTRAL",
+    "position": "HOLD",
+    "pivot_right": 5
+  },
+  "tv_values": null,
+  "comparison": null
+}

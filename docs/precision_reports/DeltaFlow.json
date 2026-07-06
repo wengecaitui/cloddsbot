@@ -1,0 +1,15 @@
+{
+  "indicator": "DeltaFlow",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "period": 14,
+    "delta_smooth": -174.2727,
+    "direction": "DOWN",
+    "signal": "SELL",
+    "pivot_count": 9,
+    "strict_lag_offset": 5
+  },
+  "tv_values": null,
+  "comparison": null
+}

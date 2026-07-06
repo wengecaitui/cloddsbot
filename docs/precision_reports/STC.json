@@ -1,0 +1,15 @@
+{
+  "indicator": "STC",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "fast": 23,
+    "slow": 50,
+    "cycle": 10,
+    "stc": 0.0,
+    "signal": "HOLD",
+    "trend": "BEAR"
+  },
+  "tv_values": null,
+  "comparison": null
+}

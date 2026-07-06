@@ -1,0 +1,17 @@
+{
+  "indicator": "TrendImpulse",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "period": 34,
+    "mult": 2.0,
+    "close": 95.9229034827915,
+    "upper": 98.0093,
+    "mid": 96.755,
+    "lower": 95.5007,
+    "zone": "BEAR_ZONE",
+    "signal": "BEAR"
+  },
+  "tv_values": null,
+  "comparison": null
+}

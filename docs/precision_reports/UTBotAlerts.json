@@ -1,0 +1,16 @@
+{
+  "indicator": "UTBotAlerts",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "keyPass": 1.0,
+    "atrPeriod": 10,
+    "trailingStop": 96.4747,
+    "close": 95.9229,
+    "buy": false,
+    "sell": false,
+    "signal": "HOLD"
+  },
+  "tv_values": null,
+  "comparison": null
+}

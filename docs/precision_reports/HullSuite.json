@@ -1,0 +1,10 @@
+{
+  "indicator": "HullSuite",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "error": "数据不足，需要 205 根 K 线"
+  },
+  "tv_values": null,
+  "comparison": null
+}

@@ -1,0 +1,19 @@
+{
+  "indicator": "FibonacciEntryBands",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "direction": "DOWN",
+    "swing_high": 98.224,
+    "swing_low": 95.7614,
+    "swing_range": 2.4626,
+    "retracement": 0.618,
+    "extension": 1.618,
+    "entry_band_lower": 94.5301,
+    "entry_band_upper": 93.8258,
+    "in_entry_band": false,
+    "position": "HOLD"
+  },
+  "tv_values": null,
+  "comparison": null
+}

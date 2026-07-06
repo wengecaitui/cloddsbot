@@ -82,7 +82,8 @@
 
 **P3 待迁移**（4 个）: Comprehensive Toolkit / TradeIQ / ...
 
-## Phase 4.6 — 精度基准测试 ⏳ (待开始)
+## Phase 4.6 — 精度基准测试 ⏳ (框架就绪，待 TV 数据)
+
 **⚠️ 修正：拒绝鸵鸟策略（2026-07-05 审计修正）**
 ```
 匹配（≤ 1e-6） → Python 通过
@@ -94,6 +95,23 @@
 
 绝对禁止：不匹配 → Python 成为唯一权威 → 修改文档粉饰太平
 ```
+
+**当前进度（2026-07-06）**：
+- ✅ 精度测试框架: `quant_engine/precision_tests/base.py`
+- ✅ 批量跑脚本: `quant_engine/precision_tests/run_all.py`
+- ✅ Python 端计算完成: `docs/python_values/{indicator}.csv`（11 个指标）
+- ✅ 报告模板: `docs/precision_reports/{indicator}.json`（待 TV 数据填充）
+- ⏳ TV 端数据: **待 TradingView 导出对比**
+
+**验收标准**:
+| 指标 | tolerance | pass_rate |
+|------|-----------|-----------|
+| 全部 11 指标 | ≤ 1e-6 | ≥ 99% |
+
+**TV 验证方式**（三选一）:
+1. **人工验证**: TV 图表加载 Pine + mock OHLCV，导出 CSV 对比
+2. **TradingView API**: 调用 TV widget 计算（需认证）
+3. **自建 Pine 解释器**: 纯 JS 实现 Pine 语法（不推荐，精度风险）
 
 ## Phase 5 — 统一数据层 ⏳ (待开始)
 **⚠️ Feature Store 数据新鲜度修正（2026-07-05 审计修正）**

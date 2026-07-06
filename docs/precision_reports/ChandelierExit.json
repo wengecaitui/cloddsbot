@@ -1,0 +1,16 @@
+{
+  "indicator": "ChandelierExit",
+  "tolerance": 1e-06,
+  "status": "PENDING_TV_DATA",
+  "py_output": {
+    "length": 22,
+    "mult": 3.0,
+    "long_stop": 96.4423,
+    "short_stop": 97.6392,
+    "direction": "SHORT",
+    "signal": "SHORT",
+    "atr": 0.6259
+  },
+  "tv_values": null,
+  "comparison": null
+}
