@@ -364,6 +364,7 @@ def handle_calc(packet: Dict) -> Dict[str, Any]:
     asset = packet.get("asset", "UNKNOWN")
     series = packet.get("series", [])
     indicators = packet.get("indicators", [])
+    ticks = packet.get("ticks", [])  # Phase 5: Tick 逐笔数据
 
     if not series:
         raise ValueError("series 数据为空")
@@ -376,6 +377,10 @@ def handle_calc(packet: Dict) -> Dict[str, Any]:
     for ind in indicators:
         name = ind.get("name", "")
         params = ind.get("params", {})
+
+        # Phase 5: 传入 ticks 参数（仅 VolumeProfile 使用精确版）
+        if ticks and name == "VolumeProfile":
+            params["ticks"] = ticks
 
         if name in INDICATOR_DISPATCH:
             results[name] = INDICATOR_DISPATCH[name](df, params)
