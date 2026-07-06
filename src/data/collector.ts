@@ -5,7 +5,6 @@ import { RingBuffer } from "./types";
 import type { WsChannel, WsTrade, WsKline, WsDepth, WsTicker, RawTick } from "./types";
 
 const BITGET_WS_PUBLIC = "wss://ws.bitget.com/mix/v1/stream";
- = "wss://ws.bitget.com/mix/v1/stream";
 
 export interface CollectorConfig {
   instIds: string[];

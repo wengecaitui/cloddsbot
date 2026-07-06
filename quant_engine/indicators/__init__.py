@@ -30,3 +30,9 @@ P2_INDICATORS: Dict = {
     "SRRange": calc_sr_range,
     "DeltaFlow": calc_deltaflow,
 }
+
+
+# Volume Profile (Phase 5 回归 — Tick 数据层就位后激活)
+from quant_engine.indicators.volume_profile import calculate as calc_volume_profile
+
+P1_INDICATORS["VolumeProfile"] = calc_volume_profile
