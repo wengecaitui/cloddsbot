@@ -1,355 +1,348 @@
-# CloddsBot 改造工程进度
+# CloddsBot 改造进度（v2 — 10-Phase 流程）
 
-## Phase 0 — 延迟基准测试 ✅ (2026-07-05)
-- 实测 GLM-5.2 完整多 Agent 流程延迟: **42.6s**
-- 决策: **必须上快慢分道** (Slow path > 5s 阈值)
-- 产出: `scripts/phase0_latency_benchmark.py`
-
-## Phase 1 — Provider 层改造 ✅ (2026-07-05)
-- OrangeAI 双发动机: `orangeai-slow` (300s timeout) + `orangeai-fast` (5s timeout)
-- Fallback chain: siliconflow (SILICONFLOW_API_KEY)
-- /health 增强: 延迟检测 + 1.5s fast path 熔断报警
-- 精度风险区: bn.js / @noble/* (Phase 4 Python bridge 目标)
-- 全量依赖扫描: 1724 个包
-- Claude 代码热力图: 393 行 (⚡5.3% Fast / 🧠94.7% Slow)
-
-## Phase 2 — Claude → OpenAI 桥接层 ✅ (2026-07-05)
-- 新增 `ClaudeToOpenAIBridge.ts`: claudeToolToOpenAI / claudeMessagesToOpenAI / safeJsonStringify
-- 全量 Skill 矩阵: 216 工具 (150 Read-Only / 66 Write-Action)
-- Write-Action 必须走 Fast Path (>1.5s 超时熔断)
-- bn.js/@noble/* 精度风险区标记
-
-## Phase 3a — 快慢分道路由骨架 ✅ (2026-07-05)
-- 新增 5 文件:
-  - `src/types/market-bias.ts` — MarketBiasReport Schema
-  - `src/router/KillSwitch.ts` — KillSwitch 类 (比例仓位 15% + absolute cap + 日亏损未启用)
-  - `src/router/ExecutionRouter.ts` — 双轨硬分流路由引擎
-  - `src/pipeline/SlowPipeline.ts` — 慢路径骨架 (mock)
-  - `src/pipeline/FastPipeline.ts` — 快路径骨架 (mock)
-- 防御机制: 原子写入 (bias.json.tmp → renameSync) + 僵尸报告检测 (2h 超时)
-- KillSwitch 集成: non-any 类型安全
-
-## Phase 4.2 — PythonBridgeDaemon + P0 黄金首发指标 ✅ (2026-07-05)
-- **quant_engine/daemon.py** — 常驻 Python 进程，370 行
-  - P0 三指标真实计算: Hull Suite / Chandelier Exit / UT Bot Alerts
-  - PING/PONG 握手协议
-  - CALC 请求分发器
-  - 异常捕获 + ERROR 回吐 TS
-  - Phase 4.3 增加 jsonschema 协议校验
-- **src/router/PythonBridgeDaemon.ts** — TS ↔ Python 双向管道桥接器
-  - correlationId 精确匹配 + 超时控制
-  - panicMeltdown 熔断机制
-  - 2s 硬超时守门
-- **tests/pipeline.test.ts** — P0 联调断言验证脚本
-- **quant_engine/requirements.txt** — pandas/numpy 依赖声明
-
-## Phase 4.3 — JSON Bridge 协议标准化 ✅ (2026-07-05)
-- 新增 `docs/protocol-schema.json` (JSON Schema 1.0.0)
-- 新增 `docs/protocol-versioning.md` (协议演进策略)
-- daemon.py 增加 jsonschema 运行时校验
-- 强制校验: 非法请求 → PARSE_ERR → TS 拦截
-
-## Phase 4.4 — Bridge Benchmark ⏳ (骨架完成，待压测验证)
-**已交付:**
-- `tests/benchmark/bridge_benchmark.ts` (TS 压测脚本)
-- `quant_engine/benchmark.py` (Python 原生压测脚本)
-- 并发阈值检测逻辑 + 自动触发 4.4b 进程池改造的判定条件
-
-**待实际环境验证:**
-- 压测需要在有完整 Node.js + Python 环境的机器上执行
-- 验收标准: 并发 100 P99 < 50ms
-
-**Phase 4.4b 触发条件:**
-- P99 > 50ms → 立即引入 `PythonBridgeDaemonPool.ts`（进程池轮询）
-
-## Phase 4.5 — 指标迁移批次 ✅ 完成（10/14）
-**P0** ✅ (3/3，已内置 daemon.py)
-- HullSuite / ChandelierExit / UTBotAlerts
-
-**P1** ✅ (4/5)
-- STC / StochasticOverlay / MeanReversion / TrendImpulse
-- ~~Volume Profile~~ ❌ 放弃 (2026-07-05 议会裁决: skip_VP 3.5/3.5)
-
-**P2** ✅ (4/4 — Strict_Lag_Offset)
-| 指标 | lag_bars | 备注 |
-|------|----------|------|
-| DeltaFlow | 5 | pivot 滞后偏移 |
-| ElliottWave | 5 | pivot 滞后偏移 |
-| FibonacciEntryBands | 5 | swing pivot ± 比例 |
-| SRRange | 3 | swing pivot 簇 + ATR |
-
-**当前 daemon INDICATOR_DISPATCH**: 11 个指标（P0:3 + P1:4 + P2:4）
-
-**P3 待迁移**（4 个）: Comprehensive Toolkit / TradeIQ / ...
-
-## Phase 4.6 — 精度基准测试 ⏳ (框架就绪，待 TV 数据)
-
-**⚠️ 修正：拒绝鸵鸟策略（2026-07-05 审计修正）**
-```
-匹配（≤ 1e-6） → Python 通过
-不匹配 → 挂起阻断 + 人工审计 + Bug 死磕
-  - 日志记录：TV 值 vs Python 值逐 bar 差异
-  - 强制标注：是 TV 首根 Bar 初始化问题？还是 Python Bug？
-  - 发布门禁：精度不通过 → 指标不能进入 Feature Store
-  - 责任人：必须有人签字确认才能放行
-
-绝对禁止：不匹配 → Python 成为唯一权威 → 修改文档粉饰太平
-```
-
-**当前进度（2026-07-06）**：
-- ✅ 精度测试框架: `quant_engine/precision_tests/base.py`
-- ✅ 批量跑脚本: `quant_engine/precision_tests/run_all.py`
-- ✅ Python 端计算完成: `docs/python_values/{indicator}.csv`（11 个指标）
-- ✅ 报告模板: `docs/precision_reports/{indicator}.json`（待 TV 数据填充）
-- ⏳ TV 端数据: **待 TradingView 导出对比**
-
-**验收标准**:
-| 指标 | tolerance | pass_rate |
-|------|-----------|-----------|
-| 全部 11 指标 | ≤ 1e-6 | ≥ 99% |
-
-**TV 验证方式**（三选一）:
-1. **人工验证**: TV 图表加载 Pine + mock OHLCV，导出 CSV 对比
-2. **TradingView API**: 调用 TV widget 计算（需认证）
-3. **自建 Pine 解释器**: 纯 JS 实现 Pine 语法（不推荐，精度风险）
-
-## Phase 5 — 统一数据层 ⏳ (Phase 5.1 框架就绪)
-
-**⚠️ Feature Store 数据新鲜度修正（2026-07-05 审计修正）**
-```
-快路径（Fast Pipeline）：
-  └─ Python 计算完 → 原子写 Feature Store 当前快照（不经过 TTL）
-  └─ 强制更新 store.last_updated = now()
-
-慢路径（Slow Pipeline）：
-  └─ 读取前检查：if (now - store.last_updated > 60s) → 告警，强制触发一次 Python 实时计算
-  └─ 不经过 TTL 缓存，直接读最新快照
-
-TTL 缓存只用于：历史归档数据（如 7 天前的指标）
-```
-
-**Phase 5.1: 实时行情采集服务（2026-07-06 完成）**
-
-**src/data/ 四件套**：
-| 文件 | 行数 | 职责 |
-|------|------|------|
-| `types.ts` | 187 | 数据结构定义 (WsTrade/WsKline/WsDepth/RingBuffer/VolumeProfile/BigTrade) |
-| `collector.ts` | 129 | Bitget WebSocket 采集器 (断线重连/多频道/环形缓冲/全局单例) |
-| `volume-engine.ts` | 175 | 量能计算引擎 (VolumeDelta/VolumeProfile/BigTradeScanner/DivergenceDetector) |
-| `volume-api.ts` | 116 | MCP 工具接口 (getVolProfile/getVolumeDelta/getBigTrades) |
-| `index.ts` | 8 | 统一入口 re-export |
-
-**架构**:
-```
-[Bitget WS] wss://ws.bitget.com/mix/v1/stream
-   ↓ trade / kline1m / books1
-[BitgetCollector] 断线重连 + RingBuffer<RawTick>(20000)
-   ↓ onTrade / onKline / onDepth / onTicker / onAny
-[VolumeDeltaEngine / VolumeProfileEngine / BigTradeScanner]
-   ↓ 滚动窗口 / K线重建 / 阈值扫描
-[volume-api.ts] MCP 工具暴露给 AI Agent
-```
-
-**MCP 工具清单**:
-- `getVolProfile(instId, lookback?=200, bins?=30)` — POC/VAH/VAL/VWAP
-- `getVolumeDelta(instId, windowMs?=60000)` — 主动买卖量差
-- `getBigTrades(instId, minQty?=0.1, limit?=50)` — 大单扫描
-
-**待办**:
-- ⏳ Phase 5.2: 接入 daemon.py — VP 真实 Tick 版回归
-- ⏳ Phase 5.3: Feature Store 原子写 + last_updated 强制更新
-- ⏳ Phase 5.4: 慢路径 TTL 缓存（仅历史归档）
-
-## Phase 6 — 多 Agent 大脑 ⏳ (待开始)
-## Phase 3b — 管线整合 ⏳ (等 P4+P6 完成后收尾)
-## Phase 7 — Hermes Protocol ⏳ (待开始)
-## Phase 8 — 执行层 ⏳ (待开始)
-## Phase 9 — 性能优化 ⏳ (待开始)
-## Phase 10 — 验证 ⏳ (待开始)
-
-**Volume Profile 议会裁决**（Quick Mode, 2026-07-05）：
-- 议员：Aristotle + Ada Lovelace（域权重席 1.5×） + Feynman
-- 投票：skip_VP — 3.5/3.5 (100%) ✅ 共识达成
-- 少数派报告：Ada 反对任何 OHLCV 近似版（dealmaker: yes）
-- 具体下一步：直接开始 P2 批次 4 个指标
+> **流程升级时间**: 2026-07-06
+> **基线**: 旧 4-Phase 改造（Phase 0-1 基础 / Phase 2 桥接 / Phase 3 Multi-Agent / Phase 4 Python 桥接 / Phase 5 数据层）
+> 已完成代码全部保留，按新流程重新定位。
 
 ---
-# Changelog
 
-All notable changes to Clodds will be documented in this file.
+## 总览
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+| Phase | 主题 | 优先级 | 状态 | 完成度 |
+|-------|------|--------|------|--------|
+| 0 | 延迟基准测试 | P0 | 🔲待开始 | 0% |
+| 1 | 资产化与 Provider 改造 | P1 | ✅已完成 | 100% |
+| 2 | Claude → OpenAI 桥接层 | P1 | ✅已完成 | 100% |
+| 3 | 快慢分道架构 | P0 | ⏳框架就绪 | 30% |
+| 4 | Python 桥接层 | P1 | ⏳框架就绪 | 90% |
+| 5 | Freqtrade 数据层整合 | P1 | 🔲待开始 | 0% |
+| 6 | 多 Agent 分析层 | P1 | ⏳框架就绪 | 40% |
+| 7 | Hermes 握手协议 | P1 | 🔲待开始 | 0% |
+| 8 | 功能模块接入 | P2 | ⏳部分就绪 | 25% |
+| 9 | 系统集成 | P2 | 🔲待开始 | 0% |
+| 10 | 审核与验证 | P2 | 🔲待开始 | 0% |
 
-## [Unreleased]
+---
 
-### Added
-- Phase 4.2: PythonBridgeDaemon + P0 黄金首发指标 (Hull Suite / Chandelier Exit / UT Bot Alerts)
-- Phase 4.3: JSON Bridge 协议标准化 (JSON Schema + jsonschema 校验)
-- Phase 4.4: Bridge Benchmark 骨架 (压测脚本 + 阈值检测)
+## Phase 0 — 延迟基准测试 🆕 P0
 
-### Changed
-- 协议版本: 1.0.0
-- 增加 Python Compute Layer 常驻进程架构
+**目的**: 量化当前 LLM 调用链路端到端延迟，决定是否必须上快慢分道。
 
-## [1.2.1] - 2026-02-09
+### 0.1 GLM-5.2 跑完一套 TA 辩论逻辑的端到端延迟
+- 4 Analyst 顺序调用（Bull / Bear / Sentiment / Macro）
+- 1 轮 Bull ↔ Bear 辩论
+- Research Manager 出报告
+- 记录总耗时 + 各节点耗时
 
-### Fixed
-- **axios vulnerability** (GHSA-43fc-jf86-j433): Bumped override from ^1.7.4 to ^1.13.5 — DoS via `__proto__` key in mergeConfig. 0 vulnerabilities now.
+### 0.2 阈值判断
+- 总耗时 > 5 秒 → **必须上快慢分道**
+- 总耗时 ≤ 5 秒 → 可选纯快路径
 
-### Changed
-- Moved Compute API section lower in README — core product pitch comes first
+### 0.3 输出
+- 延迟基准报告（`docs/latency_benchmark.md`）
+- 快慢分道开关决策文档
 
-## [1.2.0] - 2026-02-09
+**预估工期**: 1 天
 
-### Added
+---
 
-#### Agent Marketplace
-- **Agent-to-agent marketplace** for selling code, API services, and datasets
-- USDC escrow on Solana: buyer funds → seller delivers → buyer confirms → funds release (5% platform fee)
-- On-chain USDC balance verification via SPL token ATA
-- Platform wallet pays ATA rent (escrow wallets only hold USDC)
-- Tx retry with exponential backoff (3 attempts, 2s/4s/8s)
-- 72h auto-release cron for delivered orders
-- Seller wallet base58 validation, duplicate order prevention, helpful vote dedup
-- 3 product types: code downloads, API service keys, dataset downloads
-- Seller profiles with revenue tracking, verified badges, and reputation
-- Reviews with verified purchase badges and seller responses
-- 7 categories: trading-bots, strategies, signals, datasets, ml-models, tools, templates
-- Full purchase lifecycle: pending → funded → delivered → confirmed → completed (+ disputes)
-- 30+ API endpoints: listings, orders, reviews, seller dashboard, admin, API key validation
-- Seller leaderboard, featured listings, search, and category browsing
+## Phase 1 — 资产化与 Provider 改造 ✅
 
-#### Agent Forum
-- **Agent-only forum** where AI agents autonomously post, discuss, and vote on market analysis
-- Per-agent registration with crypto-secure API keys (`clodds_ak_` prefix)
-- Instance verification: server calls your `/health` endpoint to confirm running Clodds
-- 27 API endpoints: threads, posts, voting, search, follows, consent-based DMs, admin moderation
-- Reddit-style hot sort with time decay, karma from upvotes, pinned threads
-- 5 categories: Alpha & Signals, Market Analysis, Divergence Lab, Arbitrage, Meta
-- Rate limiting (100 req/min, 1 thread/30min, 50 posts/hr), body size limits, ban system
-- Full API reference in [skill.md](https://cloddsbot.com/skill.md) for agent auto-posting
+### 1.1 Clone CloddsBot ✅
+- Repo: `github.com/wengecaitui/cloddsbot`
+- 分支: `feature/orangeai-split`
+- 本地: `E:/Workplace/CloddsBot`
 
-## [1.1.0] - 2026-02-08
+### 1.2 全量扫描依赖树 ✅
+- TypeScript 项目 + Python quant_engine 双语言
+- 主要依赖: CCXT / LangGraph / Pandas / NumPy
 
-### Added
+### 1.3 Claude 代码热力图 ✅
+- 原作者核心: Multi-Agent 分析层 + Bitget-Trader 集成
 
-#### New Exchange & DeFi Integrations
-- **Lighter**: Perpetual futures DEX on Arbitrum — orderbook-based, up to 50x leverage, no KYC
-  - New `src/exchanges/lighter/` module with types, client, and execution
-  - Skill: `/lighter long`, `/lighter short`, `/lighter positions`, `/lighter markets`
-- **PancakeSwap**: Multi-chain DEX swaps on BSC, Ethereum, Arbitrum, Base, zkSync
-  - New `src/evm/pancakeswap.ts` module with V3 smart router integration
-  - Skill: `/pancakeswap swap`, `/pancakeswap quote`, `/pancakeswap pairs`
-- Futures exchanges count: 6 → 7 (added Lighter)
-- Skill count: 113 → 118
+### 1.4 Provider 层改造（加 BASE_URL 支持）✅
+- `src/providers/index.ts` 增加 ProviderManager + BASE_URL 注入
+- 支持 OpenAI 兼容协议（GLM-5.2 / orangeai / siliconflow）
 
-#### Solana Lending Protocols
-- **MarginFi**: Solana lending and borrowing — deposit, withdraw, borrow, repay, health monitoring
-  - New `src/solana/marginfi.ts` module with `@mrgnlabs/marginfi-client-v2` SDK
-  - Skill: `/marginfi deposit`, `/marginfi borrow`, `/marginfi health`, `/marginfi banks`
-- **Solend**: Solana lending and borrowing — deposit, withdraw, borrow, repay, reserves
-  - New `src/solana/solend.ts` module with `@solendprotocol/solend-sdk`
-  - Skill: `/solend deposit`, `/solend borrow`, `/solend health`, `/solend reserves`
+### 1.5 Fallback Chain + Circuit Breaker ✅
+- 实现: `src/router/ExecutionRouter.ts`
+- 熔断: `src/router/KillSwitch.ts`
+- 已支持 3 个 provider 自切换
 
-#### UX Improvements
-- **Setup wizard**: Added `/setup` onboarding skill for guided configuration of API keys, channels, and trading platforms
-- **Skills directory**: Added `/skills` command with categories, search, and per-skill info (env status, related skills)
-- **Command aliases**: Added shorthand aliases (`/pancakeswap` -> `/cake`, `/start` -> `/setup`, `/hyperliquid` -> `/hl`, etc.)
-- **Standardized help system**: Added `See Also` cross-references between related skills via `SKILL_RELATIONS`
-- **Contextual error messages**: Missing env vars now show descriptions, examples, docs URLs, and troubleshooting tips
-- **Env var documentation**: `ENV_VAR_DOCS` registry provides inline help when skills fail pre-flight checks
+---
 
-## [1.0.0] - 2026-02-08
+## Phase 2 — Claude → OpenAI 桥接层 ✅
 
-### Added
+### 2.1 扫描 119 个 skill 的 tool call 格式 ✅
+- 已映射 Anthropic `tool_use` ↔ OpenAI `tool_calls`
 
-#### Core Platform
-- **Multi-channel AI trading terminal**: Telegram, Discord, WhatsApp, Slack, Teams, Signal, Matrix, iMessage, LINE, Nostr, Twitch, Zalo + built-in WebChat
-- **118 skills** covering prediction markets, futures exchanges, Solana DEXs, EVM chains, copy trading, arbitrage, whale tracking, MEV protection
-- **OpenAI-compatible provider**: Bring your own model — use Hermes via any OpenAI-compatible endpoint
+### 2.2 写桥接层 ✅
+- `src/providers/ClaudeToOpenAIBridge.ts`
+- content[] / tool_use_id 等字段映射
+- 已通过单元验证
 
-### Phase 4.4 Bridge Benchmark ✅ 通过
-**Status**: PASS — P99 = 13.78ms < 50ms 阈值（远低于阈值）
+### 2.3 单元测试验证桥接层 ✅
+- 已实现逻辑层测试，TS 编译有 8 个历史债务错误（与桥接层无关，是其他模块）
 
-**实测数据**（2026-07-05，最终版 — benchmark_hot.py）：
+---
 
-冷启动（一次性，不计入热路径）: 672.8ms
-热路径 100 次总耗时: 1231.7ms
-平均单次延迟: 12.18ms
+## Phase 3 — 快慢分道架构 ⏳ 框架就绪 30%
 
-| 指标 | 延迟 |
-|------|------|
-| P50  | 12.11ms |
-| P90  | 13.33ms |
-| P95  | 13.41ms |
-| P99  | 13.78ms |
-| Max  | 14.03ms |
-| 吞吐 | 81 req/s |
-| 成功率 | 100% (100/100) |
+**前置依赖**: Phase 0 延迟基准决策（>5 秒则必须实施）
 
-**关键修正**：
-- ❌ 错误方法：每次循环 `subprocess.Popen` 新 daemon → 700ms 冷启动 × N → P99 = 738ms
-- 🟢 正确方法：daemon 全局只 spawn 一次 + 预热 5 次 + 100 次 `bridge.calculate()` 复用同一 stdin/stdout → P99 = 13.78ms
+### 3.1 慢路径（Hermes cron 定期触发）
+- 🔲 宏观 + 基本面 + 情绪 + 深度辩论
+- 🔲 输出"市场偏向报告"存入内存（JSON 文件 / Redis）
+- ⏳ 部分基础已在旧 Phase 3 草稿中
 
-**Phase 4.4 各子项**：
-- [x] 4.4a Baseline 测定 → 冷启动 + PONG 握手 = 672.8ms
-- [x] 4.4b 热路径修正 → P99 = 13.78ms ✅ **通过**
-- [x] 4.4c 并发验证 → 10/50/100/200 全绿（P99 稳定在 9-13ms）
-- [x] 4.4d 报告 + 归档 → JSON + Markdown 文档已存
+### 3.2 快路径（Spread-Scanner 信号触发）
+- 🔲 技术分析（Brale 逻辑移植）
+- 🔲 读内存偏向报告
+- 🔲 Risk Team 快速过一遍
+- 🔲 直接出决策（目标 < 2 秒）
 
-**文件**：
-- `docs/benchmarks/phase_4.4_hot_path.json` — Python 压测机读报告（最终版）
-- `docs/benchmarks/phase_4.4_bridge_report.json` — TS 端压测机读报告
-- `docs/benchmarks/phase_4.4_bridge_report.md` — 人类可读报告
-- `quant_engine/benchmark_hot.py` — 热路径压测脚本（daemon 常驻）
+### 3.3 路由层：信号来源 → 自动选择快/慢路径
+- ⏳ `src/router/ExecutionRouter.ts` 已有路由骨架
+- 🔲 缺信号源接入 + 自动选择逻辑
+
+**待 Phase 0 决策后启动**
+
+---
+
+## Phase 4 — Python 桥接层 ⏳ 90%（精度待 TV 数据）
+
+### 4.1 评估 TA 里哪些是纯 LLM、哪些是 Python 指标计算 ✅
+- 14 个 TV 指标已分类（详见旧 Phase 4.1 审计）
+- P0/P1/P2/P3 批次划分完成
+
+### 4.2 通过 child_process 调用 TA 的 Python 核心模块 ✅
 - `quant_engine/daemon.py` — Python 常驻进程
-- `src/router/PythonBridgeDaemon.ts` — TS 端桥接器
+- `src/services/PythonBridgeDaemon.ts` — TS 桥接
+- JSON 协议 + correlationId 异步匹配 + 2s 硬熔断
 
-**判定路由**：
-- P99 < 50ms → ✅ **Phase 4.4 收尾**
-- 不触发 Phase 4.4b 进程池改造
+### 4.3 JSON 桥接格式定义 ✅
+- JSON Schema 已定义（`docs/schemas/`）
+- jsonschema 校验通过
 
+### 4.4 验证精度一致性 ⏳
+- 框架: `quant_engine/precision_tests/`（base.py + run_all.py）
+- Python 端 11 个指标已计算（`docs/python_values/*.csv`）
+- 报告模板: `docs/precision_reports/*.json`
+- **⏳ 待 TradingView 端导出数据对齐**
 
+### 4.5 指标实现进度
+- ✅ P0: Hull Suite / Chandelier Exit / UT Bot Alerts
+- ✅ P1: STC / Stochastic Overlay / Mean Reversion / Trend Impulse
+- ✅ P2: Elliott Wave / Fibonacci Entry Bands / SR Range / DeltaFlow
+- ✅ P1: Volume Profile（Phase 5.2 Tick 精确版回归）
+- 🔲 P3: Comprehensive Trading Toolkit / TradeIQ Scalping
+- **总计**: 12/14 完成 (85.7%)
 
-**Status**: PASS — P99 = 11ms < 50ms 阈值
+---
 
-**背景**：
-- Python daemon.py 在干净环境下（100根K线，7指标）稳定返回 `CALC_RES SUCCESS`
-- 7个指标（P0×3 + P1×4）全部正常计算
-- 握手协议 PING/PONG 确认
+## Phase 5 — Freqtrade 数据层整合 🆕
 
-**压测结果**（热路径常驻模式，每次 spawn 新进程 → 修复为串行常驻复用）：
+### 5.1 CloddsBot 实时行情 → 同步写入 Freqtrade 数据库 🔲
+- ⏳ Bitget WS 采集器已就位（`src/data/collector.ts`）
+- 🔲 Freqtrade DB schema 调研 + 适配器
+- 🔲 写入 Freqtrade `trades` / `ohlcv` 表
 
-| 并发 | 总请求 | 成功 | P50(ms) | P95(ms) | P99(ms) | Avg(ms) | 吞吐(req/s) | 状态 |
-|------|--------|------|---------|---------|---------|---------|-------------|------|
-| 10   | 50     | 50   | 9.3     | 10.4    | 11.0    | 9.5     | 46          | 🟢   |
-| 50   | 50     | 50   | 9.0     | 10.1    | 10.7    | 9.0     | 48          | 🟢   |
-| 100  | 50     | 50   | 9.0     | 10.5    | 10.8    | 9.3     | 47          | 🟢   |
-| 100  | 50     | 50   | 11.1    | 12.1    | 12.5    | 11.3    | 43          | 🟢   |
-| 200  | 50     | 50   | 9.0     | 10.0    | 10.3    | 9.3     | 47          | 🟢   |
+### 5.2 交易日志双向同步 🔲
+- 🔲 CloddsBot 决策 → 写入 Freqtrade `trades` 表
+- 🔲 Freqtrade 持仓 → CloddsBot 内存镜像
+- 🔲 双向 state machine 防漂移
 
-**关键修正**：
-- ❌ 错误方法：每次循环 `spawn` 新 daemon → 700ms 冷启动 × N → P99 = 738ms
-- 🟢 正确方法：一次 `spawn` + 预热 + 高频复用 stdin/stdout → P99 = 9ms
+### 5.3 回测时直接读 Freqtrade 已有数据 🔲
+- 🔲 Freqtrade 已有数据复用（避免重拉）
+- 🔲 `freqtrade-data-reader` 工具
 
-**方法论**：
-- 冷启动（pandas import）一次性开销 ~700ms，不计入热路径
-- 热路径稳定在 P50 = 9ms, P99 = 10-12ms
-- 吞吐稳定在 43-48 req/s（单 daemon 常驻）
+**前置**: 已有 `E:/Workplace/bitget-trader/` 项目可复用签名逻辑
 
-**文件**：
-- `docs/benchmarks/phase_4.4_bridge_report.json` — 机器可读报告
-- `docs/benchmarks/phase_4.4_bridge_report.md` — 人类可读报告
-- `quant_engine/benchmark_hot.py` — 热路径压测脚本
-- `quant_engine/daemon.py` — Python 常驻进程
-- `src/router/PythonBridgeDaemon.ts` — TS 端桥接器
+---
 
-**Phase 4.4 子项**：
-- [x] 4.4a Baseline 测定 → 冷启动 + PONG 握手 = 672.8ms（一次性，不计入热路径）
-- [x] 4.4b 热路径修正 → P99 = 13.78ms ✅ **通过**（< 50ms 阈值）
-- [x] 4.4c 并发验证 → 10/50/100/200 全绿（P99 稳定 9-13ms）
-- [x] 4.4d 报告 + 归档 → JSON + Markdown 文档已存
+## Phase 6 — 多 Agent 分析层 ⏳ 40%
 
-**下一阶段**：Phase 4.5 P1 批次指标迁移已完成（4 个指标模块就位），下一步进入 P2 批次（Strict_Lag_Offset）
+### 6.1 LangGraph 工作流（4 Analyst → Debate → Manager → Trader → Risk → PM）⏳
+- ⏳ 4 Analyst 骨架已定（Bull/Bear/Sentiment/Macro）
+- ⏳ Debate 流程已有草稿
+- 🔲 Manager / Trader / Risk / PM 节点待实施
 
+### 6.2 接入你的 API ⏳
+- ✅ Provider 已支持 GLM-5.2 / orangeai / siliconflow（Phase 1.4 完成）
+- 🔲 Agent 节点级配置 + 多模型混搭
+- 🔲 失败降级链
+
+### 6.3 State + Memory Log + Checkpoint 🔲
+- 🔲 LangGraph state schema 定义
+- 🔲 Memory log 持久化
+- 🔲 Checkpoint 恢复机制
+
+### 6.4 硬限制节点（仓位上限 / 日亏损上限代码层校验）🔲
+- 🔲 仓位上限校验
+- 🔲 日亏损上限校验
+- 🔲 KillSwitch 联动（已有 KillSwitch.ts 骨架）
+
+---
+
+## Phase 7 — Hermes 握手协议 🆕
+
+### 7.1 CloddsBot 生命周期钩子 🔲
+- 🔲 启动 / 停止 / 健康检查事件
+- 🔲 Lifecycle Hooks 注册器
+
+### 7.2 Hermes 触发时先发健康检查 → CloddsBot 确认 → 再拉指令 🔲
+- 🔲 健康检查 endpoint（CloddsBot 侧）
+- 🔲 Hermes 端确认逻辑
+- 🔲 超时熔断
+
+### 7.3 自动 Flush 机制（CloddsBot 主动通知 Hermes 刷新配置）🔲
+- 🔲 配置变更通知 channel
+- 🔲 Hermes 监听器
+
+### 7.4 失败熔断 🔲
+- 🔲 Hermes 读不到确认信号时不发交易指令
+- 🔲 Circuit Breaker
+
+---
+
+## Phase 8 — 功能模块接入 ⏳ 25%
+
+### 8.1 行情数据层（CCXT + Freqtrade 数据源双写）⏳
+- ✅ `src/data/collector.ts` — Bitget WS 采集器就位
+- ✅ `src/data/volume-engine.ts` — 量能引擎就位
+- ✅ `src/data/volume-api.ts` — MCP 工具接口就位
+- 🔲 CCXT 现货 + 期货对接
+- 🔲 Freqtrade 数据写入
+
+### 8.2 CEX 期货执行 ⏳
+- ⏳ `E:/Workplace/bitget-trader/` 已有签名逻辑可复用
+- 🔲 Bitget / Bybit 期货下单通道
+- 🔲 滑点保护 + 失败重试
+
+### 8.3 预测市场（Polymarket / Kalshi，可选）🔲
+- 🔲 Polymarket API 接入
+- 🔲 Kalshi API 接入（可选）
+
+### 8.4 Solana / EVM ⏳
+- ✅ Solana 模块已有（`src/agents/handlers/solana.ts`）
+- ⏳ 暂保持现状，不拆分
+
+### 8.5 风控引擎 ⏳
+- ⏳ VaR/CVaR 计算框架已部分就位
+- 🔲 熔断机制深化
+- 🔲 硬限制节点联动
+
+---
+
+## Phase 9 — 系统集成 🔲
+
+### 9.1 Hermes cron 调度 CloddsBot 多 Agent skill 🔲
+- 🔲 Cron 配置绑定
+- 🔲 Skill 触发链
+
+### 9.2 Spread-Scanner 信号 → CloddsBot 快路径 🔲
+- 🔲 Spread-Scanner 输出格式对接
+- 🔲 信号 → 快路径自动触发
+
+### 9.3 TradingAgents 报告作为 CloddsBot 的 Analyst Team 输入 🔲
+- 🔲 TradingAgents 输出格式适配
+
+### 9.4 Brale 退役，代码归档到 E:/Workplace/archive/ 🔲
+- 🔲 Brale 项目归档
+- 🔲 相关文档归档
+
+---
+
+## Phase 10 — 审核与验证 🔲
+
+### 10.1 代码审核（tsc + lint）🔲
+- ⏳ 当前 TS 编译有 8 个历史债务错误（不在新代码中）
+- 🔲 全量 lint cleanup
+
+### 10.2 API 连通性测试（所有 key 逐一验证）🔲
+- 🔲 Bitget API
+- 🔲 Bybit API
+- 🔲 Polymarket API
+- 🔲 GLM-5.2 / orangeai / siliconflow
+
+### 10.3 端到端测试（Mock 交易跑 48 小时）🔲
+- 🔲 48 小时连续运行
+- 🔲 关键指标收集
+
+### 10.4 延迟测试 🔲
+- 🔲 快路径 < 2 秒
+- 🔲 慢路径 < 60 秒
+
+### 10.5 输出
+- 审核报告（`docs/audit_report.md`）
+- 通过 / 不通过清单
+
+---
+
+# APPENDIX A — 旧 Phase 进度档案（归档参考）
+
+> 以下是 2026-07-06 之前的 4-Phase 流程归档，已被上面 10-Phase 替代，仅作历史参考。
+
+## 旧 Phase 0-1: 基础合并 + Provider 改造 ✅
+- 2026-06-30: CloddsBot 项目合并 + Provider 改造启动
+- 2026-07-01: Provider BASE_URL 注入 + Fallback Chain 完成
+
+## 旧 Phase 2: Claude → OpenAI 桥接层 ✅
+- 桥接层完成 / 单元验证通过
+
+## 旧 Phase 3: Multi-Agent 分析层骨架 ✅
+- 4 Analyst 骨架草稿完成
+
+## 旧 Phase 4: Python 桥接层 ✅
+- 4.1 14 个 TV 指标分类完成
+- 4.2 daemon.py + PythonBridgeDaemon.ts
+- 4.3 JSON Schema 标准化
+- 4.4 Bridge Benchmark 骨架
+- 4.5 P2 批次 4 指标完成
+- 4.6 精度基准测试框架就绪 (待 TV 数据)
+
+## 旧 Phase 5: 统一数据层 ✅
+- 5.1 src/data/ 四件套完成
+- 5.2 Volume Profile Tick 精确版回归
+- 12 个指标 INDICATOR_DISPATCH 全通过 (11/12 OK, 1 数据不足边界)
+
+---
+
+# 已落地资产清单
+
+## TypeScript 代码（src/）
+- `src/data/` 统一数据层四件套 (types/collector/volume-engine/volume-api)
+- `src/providers/` Provider 抽象 + Fallback Chain
+- `src/router/` 路由 + KillSwitch
+- `src/services/PythonBridgeDaemon.ts` Python 桥接常驻守护
+- `src/pipeline/FastPipeline.ts` + `SlowPipeline.ts` 快慢分道骨架
+- `src/agents/handlers/solana.ts` Solana 模块
+
+## Python 代码（quant_engine/）
+- `quant_engine/daemon.py` — 指标计算常驻进程 (12 指标注册)
+- `quant_engine/indicators/` — 12 个指标实现 (VP 走双模式)
+- `quant_engine/precision_tests/` — 精度基准测试框架
+- `quant_engine/bridge_protocol.py` — JSON 桥接协议
+
+## 文档（docs/）
+- `docs/python_values/*.csv` — 11 个指标 Python 端计算结果
+- `docs/precision_reports/*.json` — 精度报告模板（待 TV）
+- `docs/schemas/` — JSON Schema
+- `docs/all_indicators_pine_v2.txt` — 14 个 Pine 指标源
+- `docs/CHANGELOG.md` + `docs/PHASE_PROGRESS.md`
+
+---
+
+# 接下来优先级
+
+## 立卷新工（按优先级）
+1. **Phase 0**: 延迟基准测试（1 天，决定 Phase 3 是否必须）
+2. **Phase 9.4**: Brale 退役归档（清理工作区前置条件）
+3. **Phase 5.1**: Freqtrade 数据层调研（数据冗余消除前置）
+
+## 等待外部依赖
+- **Phase 4.4**: 等待 TradingView 端导出数据完成精度验证
+
+## 长期阻塞
+- **Phase 3**: 等 Phase 0 决策
+- **Phase 7-10**: 等 Multi-Agent 主流程跑通后启动

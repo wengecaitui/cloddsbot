@@ -261,14 +261,15 @@ P0_INDICATORS = {
     "UTBotAlerts": calc_ut_bot_alerts,
 }
 
-# 导入 P1
-from quant_engine.indicators import P1_INDICATORS, P2_INDICATORS
+# 导入 P1 + P2 + P3
+from quant_engine.indicators import P1_INDICATORS, P2_INDICATORS, P3_INDICATORS
 
-# 合并 P0 + P1 + P2 指标生成完整分发器
+# 合并 P0 + P1 + P2 + P3 指标生成完整分发器
 INDICATOR_DISPATCH = {}
 INDICATOR_DISPATCH.update(P0_INDICATORS)
 INDICATOR_DISPATCH.update(P1_INDICATORS)
 INDICATOR_DISPATCH.update(P2_INDICATORS)
+INDICATOR_DISPATCH.update(P3_INDICATORS)
 
 
 # ─── PING/PONG 握手 ─────────────────────────────────────────────────────────
