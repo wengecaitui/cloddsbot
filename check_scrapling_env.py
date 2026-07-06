@@ -60,7 +60,7 @@ def main():
     print()
 
     print("--- MCP 依赖 ---")
-    print(check_module("json") or "✅ 内置")  # 标准库
+    print("✅ json（内置）")
     print()
 
     if errors:

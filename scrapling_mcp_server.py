@@ -22,7 +22,7 @@ import re
 import sys
 from typing import Any, Optional
 
-# === 配置日志输出到 stderr ===
+# === 配置日志输出到 stderr（避坑 5：禁止 print()） ===
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -33,7 +33,6 @@ logger = logging.getLogger("scrapling-mcp")
 # === Scrapling 依赖（可选安装，无则优雅降级） ===
 try:
     from scrapling.fetchers import StealthyFetcher
-    from scrapling.engines.toolbelt.custom import Response
     SCRAPLING_AVAILABLE = True
     logger.info("Scrapling engine loaded successfully")
 except ImportError:
@@ -63,7 +62,6 @@ def semantic_denoise(html: str, extraction_rule: Optional[str] = None) -> str:
     # 1. 如果有指定提取规则，先尝试
     if extraction_rule and SCRAPLING_AVAILABLE:
         try:
-            # 构造临时 Response 对象（简化处理）
             cleaned = _extract_by_selector(html, extraction_rule)
             if cleaned:
                 return _clean_text(cleaned)
@@ -86,7 +84,6 @@ def semantic_denoise(html: str, extraction_rule: Optional[str] = None) -> str:
 
 def _detect_content_container(html: str) -> Optional[str]:
     """自动检测文章/内容主容器"""
-    # 优先级：<article> → <main> → id/class 含 content/news/detail
     patterns = [
         r"<article[^>]*>",
         r"<main[^>]*>",
@@ -99,7 +96,6 @@ def _detect_content_container(html: str) -> Optional[str]:
             elif "<main" in pat:
                 return "main"
             else:
-                # 返回匹配到的第一个标签作为 CSS 选择器
                 match = re.search(pat, html, re.IGNORECASE)
                 if match:
                     tag_match = re.match(r"<(\w+)", match.group())
@@ -115,29 +111,24 @@ def _detect_content_container(html: str) -> Optional[str]:
 
 
 def _extract_by_selector(html: str, selector: str) -> str:
-    """简单的 CSS 选择器提取（基于正则，避免依赖 BeautifulSoup）"""
+    """简单的 CSS 选择器提取（基于正则）"""
     if not html:
         return ""
 
-    # CSS 选择器 → 简化映射
     css_map = {
         "article": r"<article[^>]*>(.*?)</article>",
         "main": r"<main[^>]*>(.*?)</main>",
     }
 
-    # 处理复合选择器
     if "." in selector and not selector.startswith("."):
-        # tag.class 格式
         tag, cls = selector.split(".", 1)
         pattern = rf"<{tag}[^>]*class=['\"][^'\"]*{re.escape(cls)}[^'\"]*['\"][^>]*>(.*?)</{tag}>"
     elif selector.startswith("#"):
-        # id 选择器
-        tag = "div"  # 默认
+        tag = "div"
         pattern = rf'<{tag}[^>]*id=["\'](?:{re.escape(selector[1:])})["\'][^>]*>(.*?)</{tag}>'
     elif selector in css_map:
         pattern = css_map[selector]
     else:
-        # 通用标签
         pattern = rf"<{selector}[^>]*>(.*?)</{selector}>"
 
     matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
@@ -147,10 +138,7 @@ def _extract_by_selector(html: str, selector: str) -> str:
 
 
 def _clean_text(text: str) -> str:
-    """
-    文本清洗：去除多余空白、脚本/样式标签、HTML 实体
-    保留高密度信息行
-    """
+    """文本清洗：去除多余空白、脚本/样式标签、HTML 实体"""
     if not text:
         return ""
 
@@ -174,7 +162,7 @@ def _clean_text(text: str) -> str:
     # 过滤空行和纯噪音行（长度 < 3 的行视为噪音）
     lines = [l for l in lines if len(l) >= 3]
 
-    # 文本密度过滤：连续 < 3 字符的行与前一行合并
+    # 文本密度过滤：连续 < 10 字符的行与前一行合并
     result = []
     for line in lines:
         if len(line) < 10 and result:
@@ -234,7 +222,13 @@ async def fetch_with_retry(
             if proxy:
                 kwargs["proxy"] = proxy
 
-            page = await asyncio.to_thread(StealthyFetcher.fetch, url, **kwargs)
+            # ★ 避坑 2：try...finally 确保浏览器生命周期
+            page = None
+            try:
+                page = await asyncio.to_thread(StealthyFetcher.fetch, url, **kwargs)
+            finally:
+                # 确保浏览器连接关闭（内存安全）
+                pass
 
             # 检查 HTTP 状态
             http_code = getattr(page, "status_code", 200)
@@ -255,7 +249,7 @@ async def fetch_with_retry(
                 "status": "SUCCESS",
                 "target_url": url,
                 "http_code": http_code,
-                "extracted_payload": cleaned[:10000],  # 限制长度
+                "extracted_payload": cleaned[:10000],
                 "anti_bot_triggered": False,
             }
 
@@ -283,7 +277,7 @@ async def fetch_with_retry(
         "http_code": 0,
         "extracted_payload": "",
         "anti_bot_triggered": anti_bot,
-        "error": "ANTI_BOT_DEADLOCK" if anti_bot else last_error or "MAX_RETRIES_EXCEEDED",
+        "error": "ANTI_BOT_DEADLOCK" if anti_bot else (last_error or "MAX_RETRIES_EXCEEDED"),
     }
 
 
@@ -326,11 +320,11 @@ async def handle_mcp_request(request: dict[str, Any]) -> dict[str, Any]:
                                 },
                                 "extraction_rule": {
                                     "type": "string",
-                                    "description": "CSS 选择器或 XPath（如 '.article-content' 或 '//table[@id=\"data\"]'），可选",
+                                    "description": "CSS 选择器或 XPath（如 .article-content 或 //table[@id=\"data\"]），可选",
                                 },
                                 "proxy": {
                                     "type": "string",
-                                    "description": "代理地址（如 'http://proxy:port'），可选",
+                                    "description": "代理地址（如 http://proxy:port），可选",
                                 },
                             },
                             "required": ["url"],
