@@ -113,7 +113,8 @@
 2. **TradingView API**: 调用 TV widget 计算（需认证）
 3. **自建 Pine 解释器**: 纯 JS 实现 Pine 语法（不推荐，精度风险）
 
-## Phase 5 — 统一数据层 ⏳ (待开始)
+## Phase 5 — 统一数据层 ⏳ (Phase 5.1 框架就绪)
+
 **⚠️ Feature Store 数据新鲜度修正（2026-07-05 审计修正）**
 ```
 快路径（Fast Pipeline）：
@@ -126,6 +127,38 @@
 
 TTL 缓存只用于：历史归档数据（如 7 天前的指标）
 ```
+
+**Phase 5.1: 实时行情采集服务（2026-07-06 完成）**
+
+**src/data/ 四件套**：
+| 文件 | 行数 | 职责 |
+|------|------|------|
+| `types.ts` | 187 | 数据结构定义 (WsTrade/WsKline/WsDepth/RingBuffer/VolumeProfile/BigTrade) |
+| `collector.ts` | 129 | Bitget WebSocket 采集器 (断线重连/多频道/环形缓冲/全局单例) |
+| `volume-engine.ts` | 175 | 量能计算引擎 (VolumeDelta/VolumeProfile/BigTradeScanner/DivergenceDetector) |
+| `volume-api.ts` | 116 | MCP 工具接口 (getVolProfile/getVolumeDelta/getBigTrades) |
+| `index.ts` | 8 | 统一入口 re-export |
+
+**架构**:
+```
+[Bitget WS] wss://ws.bitget.com/mix/v1/stream
+   ↓ trade / kline1m / books1
+[BitgetCollector] 断线重连 + RingBuffer<RawTick>(20000)
+   ↓ onTrade / onKline / onDepth / onTicker / onAny
+[VolumeDeltaEngine / VolumeProfileEngine / BigTradeScanner]
+   ↓ 滚动窗口 / K线重建 / 阈值扫描
+[volume-api.ts] MCP 工具暴露给 AI Agent
+```
+
+**MCP 工具清单**:
+- `getVolProfile(instId, lookback?=200, bins?=30)` — POC/VAH/VAL/VWAP
+- `getVolumeDelta(instId, windowMs?=60000)` — 主动买卖量差
+- `getBigTrades(instId, minQty?=0.1, limit?=50)` — 大单扫描
+
+**待办**:
+- ⏳ Phase 5.2: 接入 daemon.py — VP 真实 Tick 版回归
+- ⏳ Phase 5.3: Feature Store 原子写 + last_updated 强制更新
+- ⏳ Phase 5.4: 慢路径 TTL 缓存（仅历史归档）
 
 ## Phase 6 — 多 Agent 大脑 ⏳ (待开始)
 ## Phase 3b — 管线整合 ⏳ (等 P4+P6 完成后收尾)
