@@ -187,3 +187,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-channel AI trading terminal**: Telegram, Discord, WhatsApp, Slack, Teams, Signal, Matrix, iMessage, LINE, Nostr, Twitch, Zalo + built-in WebChat
 - **118 skills** covering prediction markets, futures exchanges, Solana DEXs, EVM chains, copy trading, arbitrage, whale tracking, MEV protection
 - **OpenAI-compatible provider**: Bring your own model — use Hermes via any OpenAI-compatible endpoint
+
+## [Unreleased]
+
+### Added (Sprint 1)
+- **IndicatorService**: FastPipeline 抽象层
+- **E2E Test**: `tests/step-1-7-e2e.test.ts`
+
