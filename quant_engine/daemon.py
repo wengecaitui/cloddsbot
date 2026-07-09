@@ -48,7 +48,8 @@ def validate_request(packet: Dict) -> None:
         return
     msg_type = packet.get("type")
     if msg_type not in PROTOCOL_SCHEMA.get("message_types", {}):
-        raise ValueError(f"未知消息类型: {msg_type}")
+        # 在外部已有类型检查，这里只做静默跳过
+        return
     schema = PROTOCOL_SCHEMA["message_types"][msg_type].get("request")
     if schema:
         jsonschema.validate(instance=packet, schema=schema)
@@ -281,6 +282,16 @@ def handle_ping(cid: str) -> Dict:
 # ─── 主循环 ────────────────────────────────────────────────────────────────
 
 def main():
+    # ─── 命令行参数解析（支持 --self-test）─────────────────────────────────────
+    if "--self-test" in sys.argv or "--selftest" in sys.argv:
+        from quant_engine.daemon_selftest import run_self_test
+        sys.exit(run_self_test())
+    
+    if "--ping" in sys.argv:
+        # 简单 ping 模式：只发 PONG 就退出
+        write_response({"type": "PONG", "correlationId": "cli-ping", "status": "READY"})
+        return
+    
     # 启动时主动发送 PONG，让 TS 端知道 daemon 已就绪
     try:
         write_response({"type": "PONG", "correlationId": "boot", "status": "READY"})
@@ -300,8 +311,18 @@ def main():
             packet = json.loads(line)
             cmd_type = packet.get("type")
             cid = packet.get("correlationId")
+            
+            # 命令类型合法性检查（在协议校验前，避免 ValueError 变成 FATAL）
+            if cmd_type not in ("PING", "CALC"):
+                write_response({
+                    "type": "ERROR",
+                    "correlationId": cid,
+                    "status": "UNKNOWN",
+                    "error": f"未知命令类型: {cmd_type}",
+                })
+                continue
 
-            # 协议校验
+            # 协议校验（JSON Schema）
             try:
                 validate_request(packet)
             except jsonschema.ValidationError as e:
