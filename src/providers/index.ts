@@ -1191,7 +1191,7 @@ if (orangeaiFastKey) {
   logger.info({ model: orangeaiFastModel, base: orangeaiFastBase }, 'OrangeAI fast path registered');
 }
 
-/** Fallback: SiliconFlow / inferaichat / 本地模型 */
+/** Fallback placeholder */
 const siliconflowKey = process.env.SILICONFLOW_API_KEY;
 if (siliconflowKey) {
   providers.register(new OpenAIProvider({

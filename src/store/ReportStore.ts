@@ -39,7 +39,7 @@ export class ReportStore {
     await fs.promises.mkdir(this.dir, { recursive: true });
     const content = JSON.stringify(report, null, 2);
     await fs.promises.writeFile(this.tmpPath, content, 'utf-8');
-    fs.rmSync(this.mainPath, { force: true });
+    // renameSync 在 POSIX 和 Windows (MoveFileEx) 上均为原子覆盖操作，无需先 rmSync
     fs.renameSync(this.tmpPath, this.mainPath);
   }
 

@@ -6,17 +6,28 @@
 /** Bitget WebSocket 订阅频道类型 */
 export type WsChannel = "trade" | "ticker" | "kline" | "depth";
 
+// ─── 指标计算引擎输入 ──────────────────────────────────────────────────────
+
+/** 单根 OHLCV K 线（Python Bridge 指标计算的原始输入） */
+export interface Series {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  /** 可选：Bar 开盘时间（Unix ms），用于对齐 */
+  ts?: number;
+}
+
 /** Bitget WS trade 推送（逐笔成交） */
 export interface WsTrade {
   channel: "trade";
-  instId: string;          // 交易对，如 "BTCUSDT"
+  instId: string;
   price: number;
-  qty: number;             // 成交量（base asset）
-  side: "buy" | "sell";   // taker 方向
-  ts: number;              // Unix ms
+  qty: number;
+  side: "buy" | "sell";
+  ts: number;
   tradeId: string;
-  /** 绝对成交额 USDT */
-  get notional(): number;
 }
 
 /** Bitget WS ticker 推送（1s 快照） */
@@ -36,14 +47,14 @@ export interface WsTicker {
 export interface WsKline {
   channel: "kline";
   instId: string;
-  interval: string;        // "1m" | "5m" | "15m" | "1H" | "4H" | "1D"
+  interval: string;
   open: number;
   high: number;
   low: number;
   close: number;
   volume: number;
-  ts: number;              // bar open time
-  confirm: boolean;        // true = bar 已关闭（可消费）
+  ts: number;
+  confirm: boolean;
 }
 
 /** Bitget WS depth delta 推送 */
@@ -95,6 +106,14 @@ export class RingBuffer<T> {
   }
 
   get length(): number { return this.size; }
+
+  /** Step 2A.3: Return all elements and reset buffer (atomic — no iteration window) */
+  drain(): T[] {
+    const result = this.all();
+    this.head = 0;
+    this.size = 0;
+    return result;
+  }
 }
 
 // ─── 量能计算引擎 ──────────────────────────────────────────────────────────

@@ -49,6 +49,31 @@ export class BitgetCollector {
 
   get buffer(): RingBuffer<RawTick> { return this._msgBuffer; }
 
+  /**
+   * Step 2A.3: 从 RingBuffer 提取最近 N 条 K 线，转为 Series[] 供指标引擎消费。
+   * 仅过滤 channel === "kline" 的数据，其余频道（trade/ticker/depth）跳过。
+   * 返回的是快照副本，不持有 RingBuffer 内部引用，无竞态。
+   * @param count 最大提取条数（默认 200，由 RingBuffer.latest 保证不超过容量）
+   */
+  seriesForIndicator(count: number = 200): import("./types").Series[] {
+    const items = this._msgBuffer.latest(count);
+    const result: import("./types").Series[] = [];
+    for (const item of items) {
+      if (item.channel === "kline") {
+        const k = item as import("./types").WsKline;
+        result.push({
+          open: k.open,
+          high: k.high,
+          low: k.low,
+          close: k.close,
+          volume: k.volume,
+          ts: k.ts,
+        });
+      }
+    }
+    return result;
+  }
+
   onTrade(cb: (t: WsTrade) => void): void { this._onTrade = cb; }
   onKline(cb: (k: WsKline) => void): void { this._onKline = cb; }
   onDepth(cb: (d: WsDepth) => void): void { this._onDepth = cb; }

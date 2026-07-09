@@ -137,7 +137,7 @@ export class ExecutionRouter extends EventEmitter {
 
     // 原子写入磁盘（SlowPipeline → ReportStore）
     try {
-      const { ReportStore } = await import('./store/ReportStore');
+      const { ReportStore } = await import('../store/ReportStore');
       const store = new ReportStore();
       await store.write(report);
     } catch (err) {
@@ -151,7 +151,7 @@ export class ExecutionRouter extends EventEmitter {
    */
   async loadBiasReportFromDisk(): Promise<MarketBiasReportFull | null> {
     try {
-      const { ReportStore } = await import('./store/ReportStore');
+      const { ReportStore } = await import('../store/ReportStore');
       const store = new ReportStore();
       return store.read<MarketBiasReportFull>();
     } catch {

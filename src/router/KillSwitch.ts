@@ -28,6 +28,14 @@ export interface KillSwitchConfig {
   enabled: boolean;
 }
 
+/** 生产安全默认值 —— 总资本为 0 会使所有交易被拒绝，直到运行时注入真实值 */
+const DEFAULT_KILLSWITCH_CONFIG: KillSwitchConfig = {
+  maxSinglePositionPct: 0.15,
+  totalCapitalUsd: 0,
+  writeActionTimeoutSec: 1.5,
+  enabled: false,
+};
+
 export interface RiskSnapshot {
   /** 当前敞口（USD） */
   currentExposureUsd: number;
@@ -48,7 +56,7 @@ export class KillSwitch extends EventEmitter {
   private dailyLossUsd: number = 0;
   private isLocked: boolean = false;
 
-  constructor(config: KillSwitchConfig = {}) {
+  constructor(config: KillSwitchConfig = DEFAULT_KILLSWITCH_CONFIG) {
     super();
     this.config = {
       maxSinglePositionPct: config.maxSinglePositionPct ?? 0.15,  // 15%

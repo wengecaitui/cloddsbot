@@ -14,15 +14,19 @@
  */
 
 import { EventEmitter } from 'events';
-import { providers } from '../providers';
+import { IndicatorService } from './IndicatorService';
 import { ExecutionRouter } from '../router/ExecutionRouter';
 import { MarketBiasReportFull } from '../types/market-bias';
+import { evaluate as decisionEngineEvaluate } from './DecisionEngine';
+import type { EngineInput } from './DecisionEngine';
 
 export interface FastPipelineConfig {
   router: ExecutionRouter;
+  /** 抽象技术指标计算服务 — FastPipeline 不关心底层实现 */
+  indicatorService: IndicatorService;
   /** 快路径模型 */
   model?: string;
-  /** 模拟延迟（毫秒，默认 50ms，Phase 3b 改为真实调用） */
+  /** 模拟延迟（毫秒），仅用于测试/基准；生产默认 0 */
   mockLatencyMs?: number;
 }
 
@@ -30,7 +34,7 @@ export interface FastPipelineResult {
   /** 决策：交易或放弃 */
   decision: 'trade' | 'skip' | 'defense';
   /** 交易方向（如有） */
-  direction?: 'long' | 'short';
+  direction?: 'long' | 'short' | 'hold';
   /** 交易符号 */
   symbol?: string;
   /** 仓位（USD） */
@@ -121,21 +125,33 @@ export class FastPipeline extends EventEmitter {
       }
     }
 
-    // Step 4: Mock 决策（Phase 3b → 真实 AI 推理 + Brale 指标）
-    await this.delay(this.config.mockLatencyMs);
+    // Step 4: 技术指标计算（通过 IndicatorService 抽象 — 底层可以是 PythonBridge、mock 或任何实现）
+    const indicatorResults = await this.config.indicatorService.calculateAll({
+      asset: signal.symbol,
+    });
 
     const bias = biasReport.assets.find(a => a.symbol === signal.symbol);
+
+    // Step 5: Decision Engine (replaceable rules — pure function, no hidden state)
+    const deInput: EngineInput = {
+      symbol: signal.symbol,
+      indicators: indicatorResults,
+      bias: bias ? { direction: bias.direction, confidence: bias.confidence } : null,
+    };
+    const deResult = decisionEngineEvaluate(deInput);
+
     this.emit('decision_made', {
       symbol: signal.symbol,
       bias: bias?.direction ?? 'hold',
+      decision: deResult.decision,
       elapsedMs: Date.now() - startTime,
     });
 
     return {
-      decision: 'skip',
+      decision: deResult.decision,
+      direction: deResult.direction,
       symbol: signal.symbol,
-      direction: 'hold',
-      reason: `FastPath mock — no real execution in skeleton (${signal.symbol})`,
+      reason: deResult.reason,
       elapsedMs: Date.now() - startTime,
       biasReport,
     };
