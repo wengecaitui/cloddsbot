@@ -6,14 +6,18 @@
  * - TS → Python: spawn + stdin.write(JSON + '\n')
  * - Python → TS: readline → handleIncomingMessage
  * - 超时: 默认 2s，Fast Pipeline 守门
+ *
+ * Sprint 2C: 超时后分级终止 Python 进程
+ *   SIGTERM → 5s 等待退出 → SIGKILL → 清理引用 → 下次请求重生
  */
 
 import { spawn, ChildProcess } from 'child_process';
 import * as readline from 'readline';
+import type { Series } from '../data/types';
 
 interface CalcRequest {
     asset: string;
-    series: Array<{ open: number; high: number; low: number; close: number; volume: number }>;
+    series: Series[];
     indicators: Array<{ name: string; params: Record<string, any> }>;
 }
 
@@ -21,6 +25,44 @@ interface PendingRequest {
     resolve: (val: any) => void;
     reject: (err: any) => void;
     timer: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * 分级终止 Python 子进程：SIGTERM → 5s → SIGKILL。
+ * 验证退出后才 resolve，不依赖 child_process.killed 属性。
+ */
+function processTerminate(proc: ChildProcess | null): Promise<void> {
+    return new Promise((resolve) => {
+        if (!proc || proc.killed) {
+            resolve();
+            return;
+        }
+
+        // 监听一次退出事件
+        let settled = false;
+        const onExit = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+        };
+        proc.once('exit', onExit);
+        proc.once('close', onExit);
+
+        // SIGTERM（优雅退出）
+        try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+
+        // 5 秒后如果还没退出 → SIGKILL
+        setTimeout(() => {
+            if (settled) return;
+            try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+            // 再等 5 秒让 SIGKILL 生效
+            setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            }, 5000);
+        }, 5000);
+    });
 }
 
 export class PythonBridgeDaemon {
@@ -118,6 +160,8 @@ export class PythonBridgeDaemon {
 
     /**
      * 通用 payload 发送器（带 correlationId 和超时控制）
+     * 正常请求路径完全不变。
+     * 超时后：reject → SIGTERM → 5s → SIGKILL → panicMeltdown
      */
     private sendPayload(type: string, body: Record<string, any>, timeoutMs: number): Promise<any> {
         if (!this.pythonProcess || !this.pythonProcess.stdin) {
@@ -131,6 +175,13 @@ export class PythonBridgeDaemon {
             const timer = setTimeout(() => {
                 this.pendingRequests.delete(cid);
                 reject(new Error(`管道通信超时 [${type}] - correlationId=${cid}，超过 ${timeoutMs}ms 未响应`));
+
+                // ── 分级终止：SIGTERM → 5s → SIGKILL ───────────────────
+                const proc = this.pythonProcess;
+                processTerminate(proc).then(() => {
+                    // 清理所有悬挂请求 + 清除进程引用
+                    this.panicMeltdown();
+                }).catch(() => {});
             }, timeoutMs);
 
             this.pendingRequests.set(cid, { resolve, reject, timer });
@@ -147,7 +198,8 @@ export class PythonBridgeDaemon {
 
     /**
      * 紧急故障熔断
-     * 清理所有悬挂请求，上报 KillSwitch（后续 Phase 3a 接入）
+     * 清理所有悬挂请求，清除进程引用
+     * （留 bridgeInitPromise 给 ensureAdapter 重生判定）
      */
     private panicMeltdown(): void {
         this.rl?.close();
@@ -159,20 +211,20 @@ export class PythonBridgeDaemon {
         }
         this.pendingRequests.clear();
 
-        // TODO Phase 3a: 触发 KillSwitch 锁死后续交易面
-        // this.killSwitch.trigger('PYTHON_DAEMON_DEAD');
-
+        // 清除进程引用 — next ensureAdapter 检测 bridge === null 后重生
         this.pythonProcess = null;
+        this.rl = null;
     }
 
     /**
      * 优雅关闭
      */
     public shutdown(): void {
+        const proc = this.pythonProcess;
         this.panicMeltdown();
-        if (this.pythonProcess) {
+        if (proc) {
             try {
-                this.pythonProcess.kill('SIGTERM');
+                proc.kill('SIGTERM');
             } catch {
                 // 忽略
             }
