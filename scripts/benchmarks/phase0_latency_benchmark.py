@@ -2,7 +2,6 @@
 """
 Phase 0.4 — Latency Benchmark: Multi-Agent Analysis Pipeline
 Measures end-to-end latency of 4 Analyst → Debate → Research Manager flow
-using inferaichat GLM-5.2 API
 """
 
 import json, time, csv, os, sys
@@ -10,9 +9,9 @@ from datetime import datetime
 from openai import OpenAI
 
 # === Config ===
-API_KEY = os.environ.get("INFERAICHAT_API_KEY", "")
-BASE_URL = "https://inferaichat.com/v1"
-MODEL = "deepseek-v4-pro"  # GLM-5.2 equivalent on inferaichat
+API_KEY = os.environ.get("INFERAICHAT_API_KEY", "sk-placeholder-replace-me")
+BASE_URL = "https://<your-new-provider-url>/v1"
+MODEL = "<your-new-model>"
 
 client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
 
