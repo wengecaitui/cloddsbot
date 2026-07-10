@@ -7,7 +7,47 @@
  *  - Claude tool_result → OpenAI role: tool (上下文历史)
  */
 
-import { OpenAIProvider, AnthropicProvider, type Anthropic } from './index';
+import { OpenAIProvider, AnthropicProvider } from './index';
+
+// =============================================================================
+// LOCAL ANTHROPIC-COMPATIBLE TYPE ALIASES
+// =============================================================================
+// This bridge operates on message shapes that match Anthropic SDK types.
+// We define minimal structural type aliases here to avoid coupling to a
+// specific @anthropic-ai/sdk version's namespace export layout. The shapes
+// below are wire-compatible with Anthropic MessageParam / ContentBlock.
+export interface AnthropicMessageParam {
+  role: 'user' | 'assistant';
+  content: string | AnthropicContentBlock[];
+}
+export interface AnthropicContentBlock {
+  type: 'text' | 'tool_use' | 'tool_result';
+  text?: string;
+  name?: string;
+  id?: string;
+  input?: Record<string, unknown>;
+}
+export interface AnthropicTextBlock extends AnthropicContentBlock {
+  type: 'text';
+  text: string;
+}
+export interface AnthropicToolResultBlockParam {
+  type: 'tool_result';
+  tool_use_id: string;
+  content: string;
+}
+
+// =============================================================================
+// RE-EXPORT AS Anthropic NAMESPACE
+// =============================================================================
+// Maintain backward compatibility: callers using `Anthropic.MessageParam[]`
+// continue to work via this local namespace.
+export namespace Anthropic {
+  export type MessageParam = AnthropicMessageParam;
+  export type ContentBlock = AnthropicContentBlock;
+  export type TextBlock = AnthropicTextBlock;
+  export type ToolResultBlockParam = AnthropicToolResultBlockParam;
+}
 
 // =============================================================================
 // TYPE GUARDS & CONVERSION HELPERS

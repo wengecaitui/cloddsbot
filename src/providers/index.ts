@@ -32,6 +32,16 @@ export interface Message {
   content: string;
 }
 
+/** OpenAI-compatible function tool definition (used by ClaudeToOpenAIBridge). */
+export interface FunctionTool {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+}
+
 export interface CompletionOptions {
   model?: string;
   maxTokens?: number;
@@ -39,6 +49,8 @@ export interface CompletionOptions {
   topP?: number;
   stopSequences?: string[];
   stream?: boolean;
+  /** OpenAI-style function tools (provider-agnostic: only used by OpenAI-compatible providers and ClaudeToOpenAIBridge). */
+  tools?: FunctionTool[];
 }
 
 export interface CompletionResult {
@@ -938,6 +950,11 @@ export class ProviderManager extends EventEmitter {
     return this;
   }
 
+  /** Get the current default provider name (public accessor). */
+  getDefault(): string | null {
+    return this.defaultProvider;
+  }
+
   /** Get a provider */
   get(name?: string): Provider {
     const providerName = name || this.defaultProvider;
@@ -1203,7 +1220,7 @@ if (siliconflowKey) {
 
 if (process.env.ANTHROPIC_API_KEY || process.env.OPENAI_API_KEY) {
   // Set default only if we registered something
-  if (!providers.defaultProvider) {
+  if (!providers.getDefault()) {
     providers.setDefault(orangeaiFastKey ? 'orangeai-fast' : 'anthropic');
   }
 }
