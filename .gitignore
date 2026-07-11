@@ -92,3 +92,6 @@ venv/
 .venv/
 .env
 .venv
+
+# Stage 1C: Quant Engine isolated venv
+/.venv-cloddsbot/

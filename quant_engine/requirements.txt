@@ -1,6 +1,11 @@
 # Python Compute Layer Requirements
 # Phase 4.2: quant_engine/daemon.py 依赖
 # 安装: pip install -r requirements.txt
+# Stage 1C: 来源自源码直接 import（daemon.py + indicators/*）:
+#   numpy, pandas:    所有指标计算必需
+#   jsonschema:       协议校验（daemon.py 直接 import）
+# note: rpds-py 是 jsonschema 的传递依赖，由 pip 自动解析
 
 pandas>=2.0.0
 numpy>=1.24.0
+jsonschema>=4.20.0
