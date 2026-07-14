@@ -1,5 +1,9 @@
 // src/types/indicators/index.ts
-// Discriminated union of all 14 indicator results
+// Discriminated union of all 14 indicator results + failure result
+//
+// Stage 2B-2P-B: Added IndicatorName and IndicatorFailureResult to handle
+// daemon partial failure responses that produce { name, error } shapes
+// instead of full success fields.
 
 export * from './base';
 export * from './hull';
@@ -32,6 +36,34 @@ import type { VolumeProfileResult } from './volume-profile';
 import type { MomentumResult } from './momentum';
 import type { OrderBlockResult } from './order-block';
 
+// ── IndicatorName — authoritative list of all known indicator names ──────
+
+export type IndicatorName =
+  | 'HullSuite'
+  | 'ChandelierExit'
+  | 'UTBotAlerts'
+  | 'STC'
+  | 'StochasticOverlay'
+  | 'MeanReversion'
+  | 'TrendImpulse'
+  | 'DeltaFlow'
+  | 'ElliottWave'
+  | 'FibonacciEntryBands'
+  | 'SRRange'
+  | 'VolumeProfile'
+  | 'CompositeMomentum'
+  | 'SmartOrderBlock';
+
+// ── IndicatorFailureResult — daemon partial failure shape ───────────────
+
+export interface IndicatorFailureResult {
+  name: IndicatorName;
+  error: string;
+  lag_bars?: number;
+}
+
+// ── IndicatorResult — all known success types + failure ─────────────────
+
 export type IndicatorResult =
   | HullResult
   | ChandelierResult
@@ -46,4 +78,5 @@ export type IndicatorResult =
   | SRRangeResult
   | VolumeProfileResult
   | MomentumResult
-  | OrderBlockResult;
+  | OrderBlockResult
+  | IndicatorFailureResult;
