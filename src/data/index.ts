@@ -5,3 +5,5 @@ export * from "./types";
 export * from "./collector";
 export * from "./volume-engine";
 export * from "./volume-api";
+export * from "./MarketSnapshot";
+export * from "./MarketSnapshotStore";
