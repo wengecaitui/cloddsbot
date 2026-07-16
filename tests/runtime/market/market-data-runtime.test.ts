@@ -495,3 +495,165 @@ test('20. start failure removes subscribers before retry', async () => {
 
   runtime.stop();
 });
+
+// ── PendingCollector — delays start until resolved/rejected externally ───────
+
+class PendingCollector extends FakeCollector {
+  private _resolve: (() => void) | null = null;
+  private _reject: ((e: Error) => void) | null = null;
+
+  start(): Promise<void> {
+    if (this.startShouldThrow) return Promise.reject(new Error('collector-start-fail'));
+    return new Promise<void>((resolve, reject) => {
+      this._resolve = resolve;
+      this._reject = reject;
+    });
+  }
+
+  resolveStart(): void { this._resolve?.(); }
+  rejectStart(e: Error): void { this._reject?.(e); }
+}
+
+// ── 21. stop while collector start is pending ────────────────────────────────
+
+test('21. stop while collector start is pending — old cycle does not resurrect', async () => {
+  const collector = new PendingCollector();
+  const store = createMarketSnapshotStore({ staleAfterMs: 60_000 });
+  const bus = createTradingEventBus();
+  const runtime = createMarketDataRuntime({
+    collectorFactory: () => collector,
+    bus,
+    store,
+    clock: new FakeClock(),
+  });
+
+  // Start — cycle 1 pending (collector.start hasn't resolved yet)
+  const startPromise = runtime.start();
+  assert.equal(runtime.isRunning, false, 'not running while start is pending');
+
+  // Stop while start is pending
+  runtime.stop();
+  assert.equal(runtime.isRunning, false);
+  assert.equal(collector.stopCount, 1, 'stop() calls collector.stop() even when start pending (resource guard)');
+
+  // Resolve the old pending start
+  collector.resolveStart();
+
+  // Wait for old promise to settle
+  await startPromise;
+
+  // Runtime must still be stopped; old cycle must not set running=true
+  assert.equal(runtime.isRunning, false, 'old cycle must not resurrect runtime');
+
+  // Old collector callback must not write to store
+  collector.emitTicker(TICKER);
+  assert.equal(store.getSnapshot('BTCUSDT'), undefined, 'old collector callback must not mutate store');
+});
+
+// ── 22. old start resolve cannot corrupt restarted cycle ─────────────────────
+
+test('22. old start resolve cannot corrupt restarted cycle', async () => {
+  const collectorA = new PendingCollector();
+  const clock = new FakeClock();
+  const runtime = createMarketDataRuntime({
+    collectorFactory: () => collectorA,
+    clock,
+    staleAfterMs: 60_000,
+  });
+
+  // Cycle 1 pending
+  const p1 = runtime.start();
+  assert.equal(runtime.isRunning, false);
+
+  // Stop before cycle 1 resolves
+  runtime.stop();
+
+  // Cycle 2 — new collector
+  const collectorB = new PendingCollector();
+  // Rewire factory to return collectorB
+  // (We can't rewire factory after creation, so we use a trick:
+  //  re-create the runtime within the test to use separate collectors)
+  // Actually, let's use a simpler approach: tracked factory
+  const collectors: PendingCollector[] = [];
+  const rt2 = createMarketDataRuntime({
+    collectorFactory: () => {
+      const c = new PendingCollector();
+      collectors.push(c);
+      return c;
+    },
+    clock,
+    staleAfterMs: 60_000,
+  });
+
+  // Cycle 1: first start
+  const p2a = rt2.start();
+  const c1 = collectors[0]!;
+
+  // Stop
+  rt2.stop();
+  assert.equal(rt2.isRunning, false);
+
+  // Resolve old cycle (cycle 1)
+  c1.resolveStart();
+  await p2a;  // old promise resolves
+
+  // Cycle 2
+  const p2b = rt2.start();
+  const c2 = collectors[1]!;
+
+  // rt2.start() while pending returns the same promise
+  const p2c = rt2.start();
+  assert.equal(p2b, p2c, 'concurrent start returns same promise');
+
+  // Resolve cycle 2
+  c2.resolveStart();
+  await p2b;
+
+  assert.equal(rt2.isRunning, true, 'cycle 2 must become running');
+  rt2.stop();
+});
+
+// ── 23. old start rejection cannot damage restarted cycle ────────────────────
+
+test('23. old start rejection cannot damage restarted cycle', async () => {
+  const collectors: PendingCollector[] = [];
+  const bus = createTradingEventBus();
+  const store = createMarketSnapshotStore({ staleAfterMs: 60_000 });
+  const runtime = createMarketDataRuntime({
+    collectorFactory: () => {
+      const c = new PendingCollector();
+      collectors.push(c);
+      return c;
+    },
+    bus,
+    store,
+    clock: new FakeClock(),
+  });
+
+  // Cycle 1 pending — will reject
+  const p1 = runtime.start();
+  const c1 = collectors[0]!;
+
+  // Stop and restart
+  runtime.stop();
+  const p2 = runtime.start();
+  const c2 = collectors[1]!;
+
+  // Reject cycle 1 (old) — must not affect cycle 2
+  c1.rejectStart(new Error('cycle-1-rejected'));
+  await p1.then(() => {}, () => {}); // swallow rejection
+
+  // Cycle 2 still works
+  assert.equal(runtime.isRunning, false, 'cycle 2 still pending');
+  c2.resolveStart();
+  await p2;
+
+  assert.equal(runtime.isRunning, true, 'cycle 2 must become running');
+
+  // Cycle 2 collector writes to store — single increment
+  c2.emitTicker(TICKER);
+  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  assert.ok(snap !== undefined, 'cycle 2 writes to store');
+  assert.equal(snap.snapshotVersion, 1, 'single version increment');
+  runtime.stop();
+});

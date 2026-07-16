@@ -7,8 +7,6 @@ import type { TradingEventPayloadMap } from '../../events';
 import { createTradingEventBus, KlineClosedEventRejectedError } from '../../events';
 import { createMarketSnapshotStore } from '../../data/MarketSnapshotStore';
 
-// ── Collector Port ──────────────────────────────────────────────────────────
-
 export interface MarketDataCollectorPort {
   start(): Promise<void>;
   stop(): void;
@@ -16,15 +14,11 @@ export interface MarketDataCollectorPort {
   onKline(handler: (kline: WsKline) => void): void;
 }
 
-// ── Runtime Failure ─────────────────────────────────────────────────────────
-
 export interface MarketDataRuntimeFailure {
   readonly source: 'collector_start' | 'collector_callback' | 'bus_publish' | 'store_subscriber';
   readonly error: unknown;
   readonly symbol?: string;
 }
-
-// ── Runtime Contract ────────────────────────────────────────────────────────
 
 export interface MarketDataRuntime {
   readonly bus: TradingEventBus;
@@ -33,8 +27,6 @@ export interface MarketDataRuntime {
   start(): Promise<void>;
   stop(): void;
 }
-
-// ── Options ─────────────────────────────────────────────────────────────────
 
 export interface MarketDataRuntimeOptions {
   collectorFactory: () => MarketDataCollectorPort;
@@ -45,26 +37,20 @@ export interface MarketDataRuntimeOptions {
   onError?: (failure: MarketDataRuntimeFailure) => void;
 }
 
-// ── Generation guard ────────────────────────────────────────────────────────
-
 type Generation = number;
 let nextGeneration: Generation = 0;
-
-// ── Factory ─────────────────────────────────────────────────────────────────
 
 export function createMarketDataRuntime(
   options: MarketDataRuntimeOptions,
 ): MarketDataRuntime {
   const clock: Clock = options.clock ?? { now: () => Date.now() };
   const staleAfterMs = options.staleAfterMs ?? 60_000;
-
   const bus: TradingEventBus = options.bus ?? createTradingEventBus();
   const store: MarketSnapshotStore =
     options.store ?? createMarketSnapshotStore({ clock, staleAfterMs });
-
   const onError = options.onError;
 
-  // — Internal state ----------------------------------------------------------
+  // — Internal state ------------------------------------------------
 
   let startPromise: Promise<void> | null = null;
   let running = false;
@@ -72,35 +58,27 @@ export function createMarketDataRuntime(
   let generation: Generation = 0;
   let unsubStoreTicker: (() => void) | null = null;
   let unsubStoreKline: (() => void) | null = null;
+  let cycleToken = 0;        // Monotonic; stop() increments to invalidate pending start cycles
 
-  // — Safe error reporting ----------------------------------------------------
+  // — Safe error reporting ------------------------------------------
 
   function safeReport(failure: MarketDataRuntimeFailure): void {
-    try {
-      onError?.(failure);
-    } catch {
-      // onError itself must never bubble
-    }
+    try { onError?.(failure); } catch { /* never bubble */ }
   }
 
-  // — Store subscriber lifecycle ----------------------------------------------
+  // — Store subscriber lifecycle ------------------------------------
 
   function subscribeStore(): void {
-    // Only register if both are clear
     if (unsubStoreTicker !== null || unsubStoreKline !== null) return;
-
     const unsubTicker = bus.subscribe('market.ticker.updated', (event) => {
       store.updateTicker({ ticker: event.ticker, receivedAt: event.receivedAt });
     });
     unsubStoreTicker = unsubTicker;
-
     try {
-      const unsubKline = bus.subscribe('market.kline.closed', (event) => {
+      unsubStoreKline = bus.subscribe('market.kline.closed', (event) => {
         store.updateClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
       });
-      unsubStoreKline = unsubKline;
     } catch (err) {
-      // Second subscription failed — roll back the first
       unsubStoreTicker = null;
       unsubTicker();
       throw err;
@@ -108,22 +86,15 @@ export function createMarketDataRuntime(
   }
 
   function unsubscribeStore(): void {
-    const tickerUnsub = unsubStoreTicker;
-    const klineUnsub = unsubStoreKline;
-
-    // Clear immediately (idempotent: subsequent calls find both null)
+    const t = unsubStoreTicker;
+    const k = unsubStoreKline;
     unsubStoreTicker = null;
     unsubStoreKline = null;
-
-    if (tickerUnsub) {
-      try { tickerUnsub(); } catch (e) { safeReport({ source: 'store_subscriber', error: e }); }
-    }
-    if (klineUnsub) {
-      try { klineUnsub(); } catch (e) { safeReport({ source: 'store_subscriber', error: e }); }
-    }
+    if (t) { try { t(); } catch (e) { safeReport({ source: 'store_subscriber', error: e }); } }
+    if (k) { try { k(); } catch (e) { safeReport({ source: 'store_subscriber', error: e }); } }
   }
 
-  // — Factory -----------------------------------------------------------------
+  // — Factory -------------------------------------------------------
 
   return {
     get bus(): TradingEventBus { return bus; },
@@ -131,9 +102,7 @@ export function createMarketDataRuntime(
     get isRunning(): boolean { return running; },
 
     start(): Promise<void> {
-      // Already starting → wait for the same promise
       if (startPromise !== null) return startPromise;
-      // Already running → no-op
       if (running) return Promise.resolve();
 
       startPromise = (async () => {
@@ -141,23 +110,20 @@ export function createMarketDataRuntime(
         generation = nextGeneration;
         const myGen = generation;
         const collector = options.collectorFactory();
+        const myToken = ++cycleToken;            // ← cycle identity
 
-        // 1. Register store subscribers (only if not already registered)
         subscribeStore();
 
-        // 2. Register collector callbacks
         collector.onTicker((ticker) => {
           if (generation !== myGen || collector !== activeCollector) return;
           try {
             const receivedAt = clock.now();
             const result = bus.publish('market.ticker.updated', { ticker, receivedAt });
-            if (result.failures > 0) {
-              safeReport({
-                source: 'store_subscriber',
-                error: new Error(`${result.failures} ticker subscriber(s) failed`),
-                symbol: ticker.instId,
-              });
-            }
+            if (result.failures > 0) safeReport({
+              source: 'store_subscriber',
+              error: new Error(`${result.failures} ticker subscriber(s) failed`),
+              symbol: ticker.instId,
+            });
           } catch (err) {
             safeReport({ source: 'bus_publish', error: err, symbol: ticker.instId });
           }
@@ -170,34 +136,41 @@ export function createMarketDataRuntime(
             const receivedAt = clock.now();
             bus.publish('market.kline.closed', { kline, receivedAt });
           } catch (err) {
-            const klineResult = err instanceof KlineClosedEventRejectedError
-              ? err.message
-              : err;
-            safeReport({ source: 'bus_publish', error: klineResult, symbol: kline.instId });
+            safeReport({
+              source: 'bus_publish',
+              error: err instanceof KlineClosedEventRejectedError ? err.message : err,
+              symbol: kline.instId,
+            });
           }
         });
 
-        // 3. Store references
         activeCollector = collector;
 
-        // 4. Start collector
         try {
           await collector.start();
         } catch (err) {
-          // Collector start failed — clean up
-          nextGeneration += 1;
-          generation = nextGeneration;
-          activeCollector = null;
-          running = false;
-          unsubscribeStore();
-          collector.stop();
-          startPromise = null;
-          safeReport({ source: 'collector_start', error: err });
-          throw err; // propagate to caller
+          // Only the active cycle may clean shared state
+          if (myToken === cycleToken) {
+            nextGeneration += 1;
+            generation = nextGeneration;
+            activeCollector = null;
+            running = false;
+            unsubscribeStore();
+            collector.stop();
+            startPromise = null;
+            safeReport({ source: 'collector_start', error: err });
+            throw err;
+          }
+          // Stale cycle: silently swallow; stop() already cleaned up
+          return;
         }
 
-        running = true;
-        startPromise = null;
+        // Only the active cycle may mark itself running
+        if (myToken === cycleToken) {
+          running = true;
+          startPromise = null;
+        }
+        // Stale cycle: return silently (promise resolves to undefined, harmless)
       })();
 
       return startPromise;
@@ -206,20 +179,17 @@ export function createMarketDataRuntime(
     stop(): void {
       if (!running && activeCollector === null) return; // idempotent
 
-      // 1. Invalidate generation (old callbacks are silently dropped)
+      cycleToken += 1;                            // ← invalidate all pending start cycles
+
       nextGeneration += 1;
       generation = nextGeneration;
 
-      // 2. Save and clear collector before stopping it
       const collector = activeCollector;
       activeCollector = null;
       running = false;
       startPromise = null;
 
-      // 3. Detach store subscribers (no more Bus → Store projection)
       unsubscribeStore();
-
-      // 4. Stop collector
       collector?.stop();
     },
   };
