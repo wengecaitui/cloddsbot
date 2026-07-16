@@ -181,3 +181,56 @@ test('12. capacityPerSeries must be positive integer', () => {
   assert.throws(() => createCandleSeriesStore({ capacityPerSeries: -1 }));
   assert.throws(() => createCandleSeriesStore({ capacityPerSeries: 1.5 }));
 });
+
+// ── Stage 3B1A: removeSymbol / removeInterval ──────────────────────────────
+
+test('13. removeSymbol deletes all intervals for symbol', () => {
+  const store = createCandleSeriesStore();
+  store.appendClosedKline({ kline: kline('BTCUSDT', '1m', 1000), receivedAt: 100 });
+  store.appendClosedKline({ kline: kline('BTCUSDT', '5m', 2000), receivedAt: 200 });
+  store.appendClosedKline({ kline: kline('ETHUSDT', '1m', 3000), receivedAt: 300 });
+
+  assert.equal(store.removeSymbol('BTCUSDT'), true, 'removed BTCUSDT');
+  assert.equal(store.getSeries('BTCUSDT', '1m', 10).length, 0, 'BTC 1m empty');
+  assert.equal(store.getSeries('BTCUSDT', '5m', 10).length, 0, 'BTC 5m empty');
+  assert.equal(store.getSeries('ETHUSDT', '1m', 10).length, 1, 'ETH 1m preserved');
+});
+
+test('14. removeSymbol non-existent returns false', () => {
+  const store = createCandleSeriesStore();
+  assert.equal(store.removeSymbol('FAKE'), false);
+});
+
+test('15. removeInterval deletes one interval', () => {
+  const store = createCandleSeriesStore();
+  store.appendClosedKline({ kline: kline('BTCUSDT', '1m', 1000), receivedAt: 100 });
+  store.appendClosedKline({ kline: kline('BTCUSDT', '5m', 2000), receivedAt: 200 });
+
+  assert.equal(store.removeInterval('BTCUSDT', '5m'), true, 'removed 5m');
+  assert.equal(store.getSeries('BTCUSDT', '5m', 10).length, 0, '5m empty');
+  assert.equal(store.getSeries('BTCUSDT', '1m', 10).length, 1, '1m preserved');
+});
+
+test('16. removeInterval non-existent returns false', () => {
+  const store = createCandleSeriesStore();
+  assert.equal(store.removeInterval('FAKE', '1m'), false);
+});
+
+test('17. remove then re-add starts empty', () => {
+  const store = createCandleSeriesStore();
+  store.appendClosedKline({ kline: kline('BTCUSDT', '1m', 1000), receivedAt: 100 });
+  store.removeSymbol('BTCUSDT');
+  store.appendClosedKline({ kline: kline('BTCUSDT', '1m', 2000), receivedAt: 200 });
+  const series = store.getSeries('BTCUSDT', '1m', 10);
+  assert.equal(series.length, 1, 'only new kline');
+  assert.equal(series[0].ts, 2000, 'old kline gone');
+});
+
+test('18. removeSymbol isolated between symbols', () => {
+  const store = createCandleSeriesStore();
+  store.appendClosedKline({ kline: kline('BTCUSDT', '1m', 1000), receivedAt: 100 });
+  store.appendClosedKline({ kline: kline('ETHUSDT', '1m', 2000), receivedAt: 200 });
+  store.removeSymbol('ETHUSDT');
+  assert.equal(store.getSeries('BTCUSDT', '1m', 10).length, 1, 'BTC preserved');
+  assert.equal(store.getSeries('ETHUSDT', '1m', 10).length, 0, 'ETH gone');
+});

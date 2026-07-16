@@ -28,6 +28,20 @@ export interface CandleSeriesStore {
 
   /** True iff at least `minimum` candles are stored for (symbol, interval). */
   hasMinimumSeries(symbol: string, interval: string, minimum: number): boolean;
+
+  /**
+   * Stage 3B1A: Remove all candle series for `symbol` across every interval.
+   * Returns true if at least one series was removed, false if symbol had no series.
+   * Subsequent appends start from empty history (warm-up restart).
+   */
+  removeSymbol(symbol: string): boolean;
+
+  /**
+   * Stage 3B1A: Remove only the (symbol, interval) series.
+   * Returns true if removed, false if no such series existed.
+   * Does not affect other intervals for the same symbol.
+   */
+  removeInterval(symbol: string, interval: string): boolean;
 }
 
 interface CandleEntry {
@@ -127,9 +141,26 @@ export function createCandleSeriesStore(
     return buf !== undefined && buf.length >= minimum;
   }
 
+  function removeSymbol(symbol: string): boolean {
+    let removed = false;
+    for (const [k, _v] of buffers) {
+      if (k.startsWith(`${symbol}::`)) {
+        buffers.delete(k);
+        removed = true;
+      }
+    }
+    return removed;
+  }
+
+  function removeInterval(symbol: string, interval: string): boolean {
+    return buffers.delete(keyOf(symbol, interval));
+  }
+
   return {
     appendClosedKline,
     getSeries,
     hasMinimumSeries,
+    removeSymbol,
+    removeInterval,
   };
 }
