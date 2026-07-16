@@ -1,3 +1,4 @@
-// Stage 3A7: trading runtime barrel
-export type { TradingRuntime, TradingRuntimeOptions } from './TradingRuntime';
+// Stage 3B1B: trading runtime barrel
+export type { TradingRuntime, TradingRuntimeOptions, UniverseApplyResult } from './TradingRuntime';
 export { createTradingRuntime } from './TradingRuntime';
+export { createPlanAwareCollector } from './PlanAwareCollector';
