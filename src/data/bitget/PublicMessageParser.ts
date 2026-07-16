@@ -1,9 +1,5 @@
-// Stage 3B2A: Bitget V2 Public Message Parser
+// Stage 3B2A-R1: Bitget V2 Public Message Parser (hardened)
 // Pure function — no network, no side effects.
-// Parses raw Bitget V2 public WS messages into typed frames.
-// Never invents confirm fields. Action is metadata only.
-
-import type { BitgetSubscriptionArg } from './SubscriptionPlanner';
 
 export type BitgetPushAction = 'snapshot' | 'update';
 
@@ -40,68 +36,47 @@ export type BitgetMarketUpdate = BitgetTickerUpdate | BitgetCandleUpdate;
 export interface BitgetAckFrame {
   readonly kind: 'ack';
   readonly event: 'subscribe' | 'unsubscribe';
-  readonly arg: BitgetSubscriptionArg;
+  readonly arg: { readonly instType: 'USDT-FUTURES'; readonly channel: string; readonly instId: string };
 }
 
 export interface BitgetErrorFrame {
   readonly kind: 'error';
   readonly code: string;
   readonly message: string;
-  readonly arg?: BitgetSubscriptionArg;
+  readonly arg?: { readonly instType: 'USDT-FUTURES'; readonly channel: string; readonly instId: string };
 }
 
 export interface BitgetDataFrame {
   readonly kind: 'data';
   readonly action: BitgetPushAction;
-  readonly arg: BitgetSubscriptionArg;
+  readonly arg: { readonly instType: 'USDT-FUTURES'; readonly channel: string; readonly instId: string };
   readonly events: readonly BitgetMarketUpdate[];
 }
 
-export interface BitgetPongFrame {
-  readonly kind: 'pong';
-}
-
-export interface BitgetIgnoredFrame {
-  readonly kind: 'ignored';
-  readonly reason: string;
-}
-
-export interface BitgetMalformedFrame {
-  readonly kind: 'malformed';
-  readonly reason: string;
-}
+export interface BitgetPongFrame { readonly kind: 'pong'; }
+export interface BitgetIgnoredFrame { readonly kind: 'ignored'; readonly reason: string; }
+export interface BitgetMalformedFrame { readonly kind: 'malformed'; readonly reason: string; }
 
 export type BitgetParsedPublicFrame =
-  | BitgetAckFrame
-  | BitgetErrorFrame
-  | BitgetDataFrame
-  | BitgetPongFrame
-  | BitgetIgnoredFrame
-  | BitgetMalformedFrame;
+  | BitgetAckFrame | BitgetErrorFrame | BitgetDataFrame
+  | BitgetPongFrame | BitgetIgnoredFrame | BitgetMalformedFrame;
 
-// ── Reverse candle channel mapping ───────────────────────────────────────────
+// ── Reverse mapping ────────────────────────────────────────────────────────
 
 const CANDLE_TO_CANONICAL: Record<string, string> = {
-  'candle1m':  '1m',
-  'candle5m':  '5m',
-  'candle15m': '15m',
-  'candle30m': '30m',
-  'candle1H':  '1h',
-  'candle4H':  '4h',
-  'candle6H':  '6h',
-  'candle12H': '12h',
-  'candle1D':  '1d',
-  'candle3D':  '3d',
-  'candle1W':  '1w',
-  'candle1M':  '1M',
+  'candle1m':'1m','candle5m':'5m','candle15m':'15m','candle30m':'30m',
+  'candle1H':'1h','candle4H':'4h','candle6H':'6h','candle12H':'12h',
+  'candle1D':'1d','candle3D':'3d','candle1W':'1w','candle1M':'1M',
 };
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Strict numeric helpers ─────────────────────────────────────────────────
 
 function fin(v: unknown): number | null {
   if (typeof v === 'number') return Number.isFinite(v) ? v : null;
   if (typeof v === 'string') {
-    const n = Number(v);
+    const t = v.trim();
+    if (t.length === 0) return null;
+    const n = Number(t);
     return Number.isFinite(n) ? n : null;
   }
   return null;
@@ -112,21 +87,25 @@ function safeInt(v: unknown): number | null {
   return n !== null && Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
-function extractArg(raw: any): BitgetSubscriptionArg | null {
+// ── Extract & validate Bitget arg ──────────────────────────────────────────
+
+function extractArg(raw: any): { instType: 'USDT-FUTURES'; channel: string; instId: string } | null {
   const arg = raw?.arg;
   if (!arg || typeof arg !== 'object') return null;
-  const instType = arg.instType;
-  const channel = arg.channel;
-  const instId = arg.instId;
-  if (typeof instType !== 'string' || typeof channel !== 'string' || typeof instId !== 'string') return null;
-  return { instType: instType as 'USDT-FUTURES', channel, instId };
+  const it = arg.instType;
+  const ch = arg.channel;
+  const id = arg.instId;
+  if (it !== 'USDT-FUTURES') return null;
+  if (typeof ch !== 'string' || ch.length === 0 || /\s/.test(ch)) return null;
+  if (typeof id !== 'string' || id.length === 0 || /\s/.test(id)) return null;
+  return { instType: 'USDT-FUTURES', channel: ch, instId: id };
 }
 
 function isPushAction(v: unknown): v is BitgetPushAction {
   return v === 'snapshot' || v === 'update';
 }
 
-// ── Ticker parser ─────────────────────────────────────────────────────────────
+// ── Ticker parser ──────────────────────────────────────────────────────────
 
 function parseTickerRows(
   argInstId: string,
@@ -137,22 +116,31 @@ function parseTickerRows(
   const results: BitgetTickerUpdate[] = [];
   for (const r of rows) {
     if (!r || typeof r !== 'object') continue;
-    // Symbol gate: if row.instId exists and differs from arg.instId, discard
-    if (typeof (r as any).instId === 'string' && (r as any).instId !== argInstId) continue;
-    const last = fin((r as any).lastPr);
-    const bid = fin((r as any).bidPr);
-    const ask = fin((r as any).askPr);
-    const baseVol = fin((r as any).baseVolume);
+    // Symbol gate: absent row.instId → use envelope arg.instId
+    // Present and string and matches → use arg.instId
+    // Present and string but mismatch → discard
+    // Present and not string → discard
+    const rowInstId = (r as any).instId;
+    if (rowInstId === undefined) { /* ok, use arg.instId */ }
+    else if (typeof rowInstId === 'string') {
+      if (rowInstId !== argInstId) continue;
+    } else {
+      continue; // non-string → discard
+    }
+    const last  = fin((r as any).lastPr);
+    const bid   = fin((r as any).bidPr);
+    const ask   = fin((r as any).askPr);
+    const bv = fin((r as any).baseVolume);
     const hi = fin((r as any).high24h);
     const lo = fin((r as any).low24h);
     const ts = safeInt((r as any).ts);
-    if (last === null || bid === null || ask === null || baseVol === null || hi === null || lo === null || ts === null) continue;
-    results.push({ kind: 'ticker', action, exchangeSymbol: argInstId, last, bestBid: bid, bestAsk: ask, volume24h: baseVol, high24h: hi, low24h: lo, ts });
+    if (last === null || bid === null || ask === null || bv === null || hi === null || lo === null || ts === null) continue;
+    results.push({ kind: 'ticker', action, exchangeSymbol: argInstId, last, bestBid: bid, bestAsk: ask, volume24h: bv, high24h: hi, low24h: lo, ts });
   }
   return results;
 }
 
-// ── Candle parser ─────────────────────────────────────────────────────────────
+// ── Candle parser ──────────────────────────────────────────────────────────
 
 function parseCandleRows(
   argInstId: string,
@@ -162,8 +150,7 @@ function parseCandleRows(
 ): BitgetCandleUpdate[] {
   if (!Array.isArray(rows)) return [];
   const interval = CANDLE_TO_CANONICAL[channel];
-  if (!interval) return []; // unknown candle channel → ignored by outer parser
-
+  if (!interval) return [];
   const results: BitgetCandleUpdate[] = [];
   for (const r of rows) {
     if (!Array.isArray(r) || r.length < 8) continue;
@@ -172,26 +159,24 @@ function parseCandleRows(
     const high   = fin(r[2]);
     const low    = fin(r[3]);
     const close  = fin(r[4]);
-    const baseVol = fin(r[5]);
-    const quoteVol = fin(r[6]);
-    const usdtVol = fin(r[7]);
+    const bv = fin(r[5]);
+    const qv = fin(r[6]);
+    const uv = fin(r[7]);
     if (startTs === null || open === null || high === null || low === null || close === null ||
-        baseVol === null || quoteVol === null || usdtVol === null) continue;
+        bv === null || qv === null || uv === null) continue;
     results.push({
       kind: 'candle', action, exchangeSymbol: argInstId, interval,
-      startTs, open, high, low, close, baseVolume: baseVol, quoteVolume: quoteVol, usdtVolume: usdtVol,
+      startTs, open, high, low, close, baseVolume: bv, quoteVolume: qv, usdtVolume: uv,
     });
   }
   return results;
 }
 
-// ── Main parser ───────────────────────────────────────────────────────────────
+// ── Main parser ────────────────────────────────────────────────────────────
 
 export function parseBitgetPublicMessage(raw: unknown): BitgetParsedPublicFrame {
-  // ── pong string ────────────────────────────────────────────────────────────
   if (raw === 'pong') return { kind: 'pong' };
 
-  // ── JSON string input → parse ──────────────────────────────────────────────
   let obj: unknown = raw;
   if (typeof raw === 'string') {
     try { obj = JSON.parse(raw); } catch {
@@ -199,49 +184,48 @@ export function parseBitgetPublicMessage(raw: unknown): BitgetParsedPublicFrame 
     }
   }
 
-  // ── Non-object input ──────────────────────────────────────────────────────
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
     return { kind: 'malformed', reason: 'input is not a JSON object' };
   }
 
   const msg = obj as Record<string, unknown>;
 
-  // ── Ack frame ─────────────────────────────────────────────────────────────
+  // ── Ack frame ──────────────────────────────────────────────────────────
   if (msg.event === 'subscribe' || msg.event === 'unsubscribe') {
     const arg = extractArg(msg);
-    if (!arg) return { kind: 'malformed', reason: 'ack missing valid arg' };
-    return { kind: 'ack', event: msg.event as 'subscribe' | 'unsubscribe', arg };
+    if (!arg) return { kind: 'malformed', reason: 'ack missing or invalid arg' };
+    return { kind: 'ack', event: msg.event, arg };
   }
 
-  // ── Error frame ────────────────────────────────────────────────────────────
+  // ── Error frame ────────────────────────────────────────────────────────
   if (msg.event === 'error') {
     const code = typeof msg.code === 'string' ? msg.code : String(msg.code ?? 'unknown');
     const message = typeof msg.msg === 'string' ? msg.msg : String(msg.msg ?? '');
-    const arg = extractArg(msg);
-    return { kind: 'error', code, message, arg: arg ?? undefined };
+    const argRaw = extractArg(msg);
+    // If arg is absent entirely, error without arg is ok.
+    // If arg is present but invalid, return malformed.
+    if (argRaw === null && msg.arg !== undefined) {
+      return { kind: 'malformed', reason: 'error frame has invalid arg' };
+    }
+    return { kind: 'error', code, message, arg: argRaw ?? undefined };
   }
 
-  // ── Data frame ────────────────────────────────────────────────────────────
+  // ── Data frame ─────────────────────────────────────────────────────────
   const action = msg.action;
   if (isPushAction(action)) {
     const arg = extractArg(msg);
-    if (!arg) return { kind: 'malformed', reason: 'data frame missing valid arg' };
-
-    const channel = arg.channel;
-    const isTicker = channel === 'ticker';
-    const isCandle = CANDLE_TO_CANONICAL[channel] !== undefined;
-
+    if (!arg) return { kind: 'malformed', reason: 'data frame missing or invalid arg' };
+    const ch = arg.channel;
+    const isTicker = ch === 'ticker';
+    const isCandle = CANDLE_TO_CANONICAL[ch] !== undefined;
     if (!isTicker && !isCandle) {
-      return { kind: 'ignored', reason: `unknown channel: ${channel}` };
+      return { kind: 'ignored', reason: `unknown channel: ${ch}` };
     }
-
     const events: BitgetMarketUpdate[] = isTicker
       ? parseTickerRows(arg.instId, action, msg.data)
-      : parseCandleRows(arg.instId, channel, action, msg.data);
-
+      : parseCandleRows(arg.instId, ch, action, msg.data);
     return { kind: 'data', action, arg, events };
   }
 
-  // ── Unknown message type ──────────────────────────────────────────────────
   return { kind: 'ignored', reason: `unrecognized message shape (keys: ${Object.keys(msg).join(',')})` };
 }
