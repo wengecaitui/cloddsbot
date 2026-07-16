@@ -1,4 +1,4 @@
-// Stage 3B1B: Plan-aware collector wrapper
+// Stage 3B1B-R1: Plan-aware collector wrapper with deep defensive snapshot
 // Translates exchange-level market events into canonical symbols using a
 // defensive snapshot of the SubscriptionPlan. Filters unsupported symbols
 // and intervals. Does not touch BitgetCollector — works at the port boundary.
@@ -13,6 +13,15 @@ interface PlanSnapshot {
   readonly byCanonical: ReadonlyMap<string, SubscriptionEntry>;
 }
 
+function deepCloneEntry(e: SubscriptionEntry): SubscriptionEntry {
+  return {
+    symbol: e.symbol,
+    exchangeSymbol: e.exchangeSymbol,
+    intervals: [...e.intervals],
+    ticker: e.ticker,
+  };
+}
+
 function snapshotPlan(plan: SubscriptionPlan): PlanSnapshot {
   const byExchange = new Map<string, SubscriptionEntry>();
   const byCanonical = new Map<string, SubscriptionEntry>();
@@ -24,8 +33,9 @@ function snapshotPlan(plan: SubscriptionPlan): PlanSnapshot {
     if (byCanonical.has(e.symbol)) {
       throw new Error(`PlanAwareCollector: duplicate canonical symbol "${e.symbol}"`);
     }
-    byExchange.set(e.exchangeSymbol, e);
-    byCanonical.set(e.symbol, e);
+    const cloned = deepCloneEntry(e);
+    byExchange.set(e.exchangeSymbol, cloned);
+    byCanonical.set(e.symbol, cloned);
   }
 
   return { version: plan.version, byExchange, byCanonical };
@@ -50,10 +60,9 @@ export function createPlanAwareCollector(
       inner.onTicker((ticker) => {
         if (!ticker || typeof ticker.instId !== 'string') return;
         const entry = snap.byExchange.get(ticker.instId);
-        if (!entry) return;                 // unknown exchange symbol
-        if (entry.ticker === false) return; // ticker disabled for symbol
+        if (!entry) return;
+        if (entry.ticker === false) return;
 
-        // Clone before rewriting instId to canonical — never mutate input
         const clone: WsTicker = { ...ticker, instId: entry.symbol };
         handler(clone);
       });
@@ -63,12 +72,9 @@ export function createPlanAwareCollector(
       inner.onKline((kline) => {
         if (!kline || typeof kline.instId !== 'string') return;
         const entry = snap.byExchange.get(kline.instId);
-        if (!entry) return;                 // unknown exchange symbol
-
-        // allowed interval check
+        if (!entry) return;
         if (!entry.intervals.includes(kline.interval)) return;
 
-        // Clone before rewriting instId to canonical — never mutate input
         const clone: WsKline = { ...kline, instId: entry.symbol };
         handler(clone);
       });

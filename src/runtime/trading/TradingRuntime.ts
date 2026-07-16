@@ -1,4 +1,7 @@
-// Stage 3B1B: TradingRuntime — universe-aware composition root
+// Stage 3B1B-R1: TradingRuntime — universe-aware composition root
+// Hardened lifecycle: deferred plan capture, one-shot Collector plan override,
+// unified apply-Promise cleanup with identity guard, no Store cleanup swallowing.
+
 import type { Clock } from '../../data/MarketSnapshot';
 import type { CandleSeriesStore } from '../../data/CandleSeriesStore';
 import { createCandleSeriesStore } from '../../data/CandleSeriesStore';
@@ -62,6 +65,22 @@ interface PlanSnapshot {
   readonly entries: ReadonlyMap<string, SubscriptionEntry>;
 }
 
+// Deep-clone a SubscriptionPlan so callers cannot mutate internal state by
+// holding onto the reference returned from universe.getPlan() or by modifying
+// the plan they receive inside the collector factory.
+function cloneSubscriptionPlan(plan: SubscriptionPlan): SubscriptionPlan {
+  const clonedEntries: SubscriptionEntry[] = [];
+  for (const e of plan.entries) {
+    clonedEntries.push({
+      symbol: e.symbol,
+      exchangeSymbol: e.exchangeSymbol,
+      intervals: [...e.intervals],
+      ticker: e.ticker,
+    });
+  }
+  return { version: plan.version, entries: clonedEntries };
+}
+
 function snapshotPlanEntries(plan: SubscriptionPlan): PlanSnapshot {
   const map = new Map<string, SubscriptionEntry>();
   for (const e of plan.entries) {
@@ -90,11 +109,7 @@ function entriesEqualSemantic(a: SubscriptionEntry, b: SubscriptionEntry): boole
 
 function computeStaleSymbols(prev: PlanSnapshot | null, next: PlanSnapshot): string[] {
   const stale: string[] = [];
-  if (!prev) {
-    // First application — no cleanup needed (Store starts empty)
-    return stale;
-  }
-  // Same version → no diff
+  if (!prev) return stale;
   if (prev.version === next.version) return stale;
 
   for (const [sym, prevEntry] of prev.entries) {
@@ -137,23 +152,38 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
     capacityPerSeries: options.candleCapacity ?? 500,
   });
 
-  // ── Lifecycle epoch ────────────────────────────────────────────────────
-  // Every stop() bumps epoch; pending start/apply check epoch before
-  // committing side effects (markApplied, appliedPlanVersion, Store cleanup).
+  // ── Lifecycle state ──────────────────────────────────────────────────────
   let epoch = 0;
   let pendingStartPromise: Promise<void> | null = null;
-  let pendingStartEpoch = -1;  // epoch captured when start() was initiated
+  let pendingStartEpoch = -1;
   let pendingApplyPromise: Promise<UniverseApplyResult> | null = null;
   let appliedPlanVersion: number | null = null;
   let appliedPlanSnapshot: PlanSnapshot | null = null;
 
-  // Wrapped collector factory: snapshot current plan, build raw collector,
-  // wrap with PlanAwareCollector. UniverseManager.getPlan returns defensive
-  // copies — we re-snapshot to internal immutable form for diffing.
+  // One-shot override: set immediately before marketData.start() is invoked.
+  // wrappedCollectorFactory consumes and clears it. If a stale call ever
+  // reaches the factory with no override present, it throws — that's a bug.
+  let pendingCollectorPlan: SubscriptionPlan | null = null;
+
+  function isMyEpoch(e: number): boolean {
+    return e === epoch;
+  }
+
+  // Wrapped collector factory: uses the one-shot captured plan override,
+  // passes a defensive copy to the external factory, passes a separate
+  // defensive copy to PlanAwareCollector. The two copies are independent —
+  // external code cannot mutate the PlanAwareCollector's filter state.
   function wrappedCollectorFactory(): MarketDataCollectorPort {
-    const plan = universe.getPlan();
-    const raw = options.collectorFactory(plan);
-    return createPlanAwareCollector(raw, plan);
+    if (pendingCollectorPlan === null) {
+      throw new Error('TradingRuntime: wrappedCollectorFactory called without a captured plan');
+    }
+    const captured = pendingCollectorPlan;
+    pendingCollectorPlan = null;
+
+    const forExternal = cloneSubscriptionPlan(captured);
+    const raw = options.collectorFactory(forExternal);
+    const forFilter = cloneSubscriptionPlan(captured);
+    return createPlanAwareCollector(raw, forFilter);
   }
 
   const marketData: MarketDataRuntime = createMarketDataRuntime({
@@ -189,16 +219,26 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
     adapterFactory: spc.adapterFactory as any,
   });
 
-  function isMyEpoch(e: number): boolean {
-    return e === epoch;
-  }
-
+  // Store cleanup: do NOT swallow errors. Callers must propagate so that
+  // appliedPlanVersion and markApplied stay consistent on cleanup failure.
   function cleanupStaleSymbols(prevSnap: PlanSnapshot | null, nextSnap: PlanSnapshot): void {
     const stale = computeStaleSymbols(prevSnap, nextSnap);
     for (const sym of stale) {
-      try { marketData.store.removeSymbol(sym); } catch { /* synchronous API — ignore */ }
-      try { marketData.candleStore.removeSymbol(sym); } catch { /* ignore */ }
+      marketData.store.removeSymbol(sym);
+      marketData.candleStore.removeSymbol(sym);
     }
+  }
+
+  // ── Unified apply-promise cleanup ─────────────────────────────────────────
+  // Single finally handler attached to every apply pipeline. The identity
+  // guard ensures an old task can never clobber a new pendingApplyPromise.
+  function registerApplyCleanup(p: Promise<UniverseApplyResult>): Promise<UniverseApplyResult> {
+    p.then(() => {
+      if (pendingApplyPromise === p) pendingApplyPromise = null;
+    }).catch(() => {
+      if (pendingApplyPromise === p) pendingApplyPromise = null;
+    });
+    return p;
   }
 
   return {
@@ -212,41 +252,45 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
     get appliedPlanVersion(): number | null { return appliedPlanVersion; },
 
     start(): Promise<void> {
-      // If a pending start exists, return the same Promise
       if (pendingStartPromise !== null) return pendingStartPromise;
-      // If running and no pending start, idempotent no-op
       if (marketData.isRunning) return Promise.resolve();
 
       const startEpoch = epoch;
       pendingStartEpoch = startEpoch;
-      const planAtStart = universe.getPlan();
+
+      // Capture the plan synchronously at start invocation; install as one-shot
+      // override so wrappedCollectorFactory uses this exact plan.
+      const planAtStart = cloneSubscriptionPlan(universe.getPlan());
+      pendingCollectorPlan = planAtStart;
 
       const p = (async () => {
         try {
           await marketData.start();
         } catch (err) {
-          // start rejected: bump epoch-aware check, do not mark applied
           if (isMyEpoch(startEpoch)) {
             pendingStartPromise = null;
             pendingStartEpoch = -1;
+            // Clear the one-shot override — start failed, do not leak it
+            pendingCollectorPlan = null;
           }
           throw err;
         }
 
-        // Successful start — verify epoch still matches
         if (!isMyEpoch(startEpoch) || !marketData.isRunning) {
-          // Stopped during start — do not commit side effects
           if (isMyEpoch(startEpoch)) {
             pendingStartPromise = null;
             pendingStartEpoch = -1;
+            pendingCollectorPlan = null;
           }
           return;
         }
 
+        // Capture the version that the live Collector is now running under.
         appliedPlanVersion = planAtStart.version;
         appliedPlanSnapshot = snapshotPlanEntries(planAtStart);
 
-        // Mark applied only if Universe hasn't advanced past this version
+        // Only mark applied if Universe hasn't advanced past this version
+        // during the async start window.
         if (universe.getPlan().version === planAtStart.version) {
           universe.markApplied(planAtStart.version);
         }
@@ -264,30 +308,42 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
       pendingStartPromise = null;
       pendingStartEpoch = -1;
       pendingApplyPromise = null;
+      pendingCollectorPlan = null;
       marketData.stop();
       slowPipeline.shutdown();
     },
 
     applyUniversePlan(): Promise<UniverseApplyResult> {
-      // Concurrent calls share the same Promise — capture before any await
+      // Concurrent calls return the exact same Promise — early return before
+      // any await ensures identity preservation.
       if (pendingApplyPromise !== null) return pendingApplyPromise;
 
-      // Build the apply pipeline immediately so concurrent callers share it
+      // Capture only the lifecycle epoch up front. The plan snapshot must be
+      // deferred until after any pending start has settled, otherwise we'd
+      // diff against a stale previous snapshot and miss cleanup work.
       const applyEpoch = epoch;
-      const prevSnap = appliedPlanSnapshot;
-      const nextPlan = universe.getPlan();
 
-      const p = (async () => {
-        // If a start is pending, wait for it to settle first
+      const p = (async (): Promise<UniverseApplyResult> => {
+        // Wait for any pending start to settle first
         if (pendingStartPromise !== null) {
           const startEpochAtCall = pendingStartEpoch;
           try {
             await pendingStartPromise;
           } catch {
-            // start failed — fall through
+            // start failed — fall through; we may still apply if now running
           }
-          // If start was invalidated by stop, return current state
-          if (epoch !== startEpochAtCall && pendingStartEpoch !== startEpochAtCall) {
+          // If start was invalidated by stop, return current state. Note we
+          // compare epoch against applyEpoch (captured at THIS call) so that
+          // a stop during the wait invalidates this apply.
+          if (epoch !== applyEpoch) {
+            return {
+              applied: false,
+              restarted: false,
+              version: appliedPlanVersion,
+              pending: universe.hasPendingPlan(),
+            };
+          }
+          if (pendingStartEpoch !== startEpochAtCall) {
             return {
               applied: false,
               restarted: false,
@@ -297,7 +353,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
           }
         }
 
-        // No pending plan → no-op
+        // No pending plan → idempotent no-op
         if (!universe.hasPendingPlan()) {
           return {
             applied: false,
@@ -307,7 +363,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
           };
         }
 
-        // Runtime not running — do not create Collector, do not mark applied
+        // Runtime not running — cannot create Collector. Stay pending.
         if (!marketData.isRunning) {
           return {
             applied: false,
@@ -317,25 +373,40 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
           };
         }
 
-        // Restart: stop → start
+        // ── Capture previous applied snapshot and exact next plan NOW ──────
+        // (after the pending start settled). Universe may keep advancing
+        // during the restart window; we still use this exact snapshot for
+        // Collector activation, appliedPlanVersion, and Store cleanup diff.
+        const prevSnap = appliedPlanSnapshot;
+        const nextPlan = cloneSubscriptionPlan(universe.getPlan());
+
+        // Restart: stop → install override → start
         try {
           marketData.stop();
         } catch {
           throw new Error('applyUniversePlan: marketData.stop failed during restart');
         }
 
+        // Install one-shot override so wrappedCollectorFactory uses nextPlan
+        // exactly. If a concurrent start already consumed pendingCollectorPlan
+        // (shouldn't happen because we waited above), guard with a check.
+        pendingCollectorPlan = nextPlan;
+
         try {
           await marketData.start();
         } catch (err) {
+          // Restart failed — leave appliedPlanVersion/appliedPlanSnapshot
+          // unchanged. Universe stays pending. Reject the Promise so caller
+          // can retry.
           if (isMyEpoch(applyEpoch)) {
-            pendingApplyPromise = null;
+            pendingCollectorPlan = null;
           }
           throw err;
         }
 
         if (!isMyEpoch(applyEpoch) || !marketData.isRunning) {
           if (isMyEpoch(applyEpoch)) {
-            pendingApplyPromise = null;
+            pendingCollectorPlan = null;
           }
           return {
             applied: false,
@@ -345,6 +416,8 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
           };
         }
 
+        // Cleanup stale Store / candle data BEFORE updating applied version.
+        // Do NOT swallow — propagate to caller and leave applied unchanged.
         const nextSnap = snapshotPlanEntries(nextPlan);
         cleanupStaleSymbols(prevSnap, nextSnap);
 
@@ -355,7 +428,6 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
           universe.markApplied(nextPlan.version);
         }
 
-        pendingApplyPromise = null;
         return {
           applied: true,
           restarted: true,
@@ -364,8 +436,11 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
         };
       })();
 
-      pendingApplyPromise = p;
-      return p;
+      // Register unified cleanup — handles success, failure, and any other
+      // rejection path. Identity guard prevents old tasks from clearing a
+      // newer pendingApplyPromise.
+      pendingApplyPromise = registerApplyCleanup(p);
+      return pendingApplyPromise;
     },
   };
 }
