@@ -1,11 +1,14 @@
 // Stage 3A3: MarketDataRuntime — ticker + kline data composition
+// Stage 3A5: project confirmed kline into CandleSeriesStore as well
 import type { WsTicker, WsKline } from '../../data/types';
 import type { Clock } from '../../data/MarketSnapshot';
 import type { MarketSnapshotStore } from '../../data/MarketSnapshot';
+import type { CandleSeriesStore } from '../../data/CandleSeriesStore';
 import type { TradingEventBus } from '../../events';
 import type { TradingEventPayloadMap } from '../../events';
 import { createTradingEventBus, KlineClosedEventRejectedError } from '../../events';
 import { createMarketSnapshotStore } from '../../data/MarketSnapshotStore';
+import { createCandleSeriesStore } from '../../data/CandleSeriesStore';
 
 export interface MarketDataCollectorPort {
   start(): Promise<void>;
@@ -23,6 +26,7 @@ export interface MarketDataRuntimeFailure {
 export interface MarketDataRuntime {
   readonly bus: TradingEventBus;
   readonly store: MarketSnapshotStore;
+  readonly candleStore: CandleSeriesStore;
   readonly isRunning: boolean;
   start(): Promise<void>;
   stop(): void;
@@ -34,6 +38,7 @@ export interface MarketDataRuntimeOptions {
   staleAfterMs?: number;
   bus?: TradingEventBus;
   store?: MarketSnapshotStore;
+  candleStore?: CandleSeriesStore;
   onError?: (failure: MarketDataRuntimeFailure) => void;
 }
 
@@ -48,6 +53,9 @@ export function createMarketDataRuntime(
   const bus: TradingEventBus = options.bus ?? createTradingEventBus();
   const store: MarketSnapshotStore =
     options.store ?? createMarketSnapshotStore({ clock, staleAfterMs });
+  // Stage 3A5: candle store — inject or default. Created once at runtime init,
+  // preserved across stop/start cycles (no re-creation).
+  const candleStore: CandleSeriesStore = options.candleStore ?? createCandleSeriesStore();
   const onError = options.onError;
 
   // — Internal state ------------------------------------------------
@@ -58,7 +66,7 @@ export function createMarketDataRuntime(
   let generation: Generation = 0;
   let unsubStoreTicker: (() => void) | null = null;
   let unsubStoreKline: (() => void) | null = null;
-  let cycleToken = 0;        // Monotonic; stop() increments to invalidate pending start cycles
+  let cycleToken = 0;
 
   // — Safe error reporting ------------------------------------------
 
@@ -76,7 +84,9 @@ export function createMarketDataRuntime(
     unsubStoreTicker = unsubTicker;
     try {
       unsubStoreKline = bus.subscribe('market.kline.closed', (event) => {
+        // Stage 3A5: dual projection into snapshot + candle series
         store.updateClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
+        candleStore.appendClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
       });
     } catch (err) {
       unsubStoreTicker = null;
@@ -99,6 +109,7 @@ export function createMarketDataRuntime(
   return {
     get bus(): TradingEventBus { return bus; },
     get store(): MarketSnapshotStore { return store; },
+    get candleStore(): CandleSeriesStore { return candleStore; },
     get isRunning(): boolean { return running; },
 
     start(): Promise<void> {
@@ -110,7 +121,7 @@ export function createMarketDataRuntime(
         generation = nextGeneration;
         const myGen = generation;
         const collector = options.collectorFactory();
-        const myToken = ++cycleToken;            // ← cycle identity
+        const myToken = ++cycleToken;
 
         subscribeStore();
 
@@ -149,7 +160,6 @@ export function createMarketDataRuntime(
         try {
           await collector.start();
         } catch (err) {
-          // Only the active cycle may clean shared state
           if (myToken === cycleToken) {
             nextGeneration += 1;
             generation = nextGeneration;
@@ -161,25 +171,22 @@ export function createMarketDataRuntime(
             safeReport({ source: 'collector_start', error: err });
             throw err;
           }
-          // Stale cycle: silently swallow; stop() already cleaned up
           return;
         }
 
-        // Only the active cycle may mark itself running
         if (myToken === cycleToken) {
           running = true;
           startPromise = null;
         }
-        // Stale cycle: return silently (promise resolves to undefined, harmless)
       })();
 
       return startPromise;
     },
 
     stop(): void {
-      if (!running && activeCollector === null) return; // idempotent
+      if (!running && activeCollector === null) return;
 
-      cycleToken += 1;                            // ← invalidate all pending start cycles
+      cycleToken += 1;
 
       nextGeneration += 1;
       generation = nextGeneration;

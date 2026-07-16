@@ -74,6 +74,32 @@ export class FastPipeline extends EventEmitter {
 
   constructor(config: FastPipelineConfig) {
     super();
+    // Stage 3A5: validate marketData config at construction time
+    if (config.marketData) {
+      const md = config.marketData;
+      if (!md.interval || typeof md.interval !== 'string') {
+        throw new Error('FastPipeline: marketData.interval must be a non-empty string');
+      }
+      if (md.minimumSeries !== undefined) {
+        if (!Number.isInteger(md.minimumSeries) || md.minimumSeries <= 0) {
+          throw new Error(`FastPipeline: marketData.minimumSeries must be a positive integer, got ${md.minimumSeries}`);
+        }
+      }
+      if (md.seriesLimit !== undefined) {
+        if (!Number.isInteger(md.seriesLimit) || md.seriesLimit <= 0) {
+          throw new Error(`FastPipeline: marketData.seriesLimit must be a positive integer, got ${md.seriesLimit}`);
+        }
+        const min = md.minimumSeries ?? 100;
+        if (md.seriesLimit < min) {
+          throw new Error(`FastPipeline: marketData.seriesLimit (${md.seriesLimit}) < marketData.minimumSeries (${min})`);
+        }
+      }
+      if (md.maxKlineAgeMs !== undefined) {
+        if (typeof md.maxKlineAgeMs !== 'number' || !Number.isFinite(md.maxKlineAgeMs) || md.maxKlineAgeMs <= 0) {
+          throw new Error(`FastPipeline: marketData.maxKlineAgeMs must be a finite positive number, got ${md.maxKlineAgeMs}`);
+        }
+      }
+    }
     this.config = {
       model: config.model ?? 'glm-5.2-flash',
       mockLatencyMs: config.mockLatencyMs ?? 50,

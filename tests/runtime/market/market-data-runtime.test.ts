@@ -5,6 +5,7 @@ import { createMarketDataRuntime } from '../../../src/runtime/market/MarketDataR
 import type { MarketDataCollectorPort, MarketDataRuntimeFailure } from '../../../src/runtime/market/MarketDataRuntime';
 import { createTradingEventBus } from '../../../src/events/TradingEventBus';
 import { createMarketSnapshotStore } from '../../../src/data/MarketSnapshotStore';
+import { createCandleSeriesStore } from '../../../src/data/CandleSeriesStore';
 import type { Clock } from '../../../src/data/MarketSnapshot';
 import type { WsTicker, WsKline } from '../../../src/data/types';
 
@@ -656,4 +657,124 @@ test('23. old start rejection cannot damage restarted cycle', async () => {
   assert.ok(snap !== undefined, 'cycle 2 writes to store');
   assert.equal(snap.snapshotVersion, 1, 'single version increment');
   runtime.stop();
+});
+
+// ── 24. kline event updates candleStore alongside snapshotStore ─────────────
+
+test('24. kline event updates candleStore alongside snapshotStore', async () => {
+  const collector24 = new FakeCollector();
+  const candle24 = createCandleSeriesStore();
+  const runtime24 = createMarketDataRuntime({
+    clock: new FakeClock(),
+    staleAfterMs: 60_000,
+    candleStore: candle24,
+    collectorFactory: () => collector24,
+  });
+  await runtime24.start();
+
+  collector24.emitKline(KLINE_CLOSED);
+
+  // Snapshot updated
+  const snap = runtime24.store.getSnapshot('BTCUSDT')!;
+  assert.ok(snap.klines['1m'] !== undefined, 'snapshot updated');
+  assert.equal(snap.klines['1m'].kline.close, 67000);
+
+  // CandleStore updated
+  const series = candle24.getSeries('BTCUSDT', '1m', 10);
+  assert.equal(series.length, 1, 'candleStore has the kline');
+  assert.equal(series[0].close, 67000);
+  runtime24.stop();
+});
+
+// ── 25. injected candleStore is reused across restart ───────────────────────
+
+test('25. injected candleStore reused across restart', async () => {
+  const candle25 = createCandleSeriesStore();
+  const collector25 = new FakeCollector();
+  const runtime25 = createMarketDataRuntime({
+    clock: new FakeClock(),
+    staleAfterMs: 60_000,
+    candleStore: candle25,
+    collectorFactory: () => collector25,
+  });
+
+  await runtime25.start();
+  collector25.emitKline(KLINE_CLOSED);
+  runtime25.stop();
+
+  assert.equal(candle25.getSeries('BTCUSDT', '1m', 10).length, 1, '1 kline before restart');
+
+  // Restart with same candleStore
+  const collector25b = new FakeCollector();
+  const runtime25b = createMarketDataRuntime({
+    clock: new FakeClock(),
+    staleAfterMs: 60_000,
+    candleStore: candle25,
+    collectorFactory: () => collector25b,
+  });
+  await runtime25b.start();
+  // Use a different ts so candleStore appends rather than replaces (same-ts guard)
+  collector25b.emitKline({ ...KLINE_CLOSED, ts: KLINE_CLOSED.ts + 60000 });
+  runtime25b.stop();
+
+  const series = candle25.getSeries('BTCUSDT', '1m', 10);
+  assert.equal(series.length, 2, 'candleStore grew (not replaced)');
+  assert.equal(series[0].close, 67000, 'first kline preserved');
+  assert.equal(series[1].close, 67000, 'second kline appended');
+});
+
+// ── 26. stop + direct bus.publish does not update candleStore ───────────────
+
+test('26. stop + direct bus.publish does not update candleStore', async () => {
+  const candle26 = createCandleSeriesStore();
+  const bus26 = createTradingEventBus();
+  const collector26 = new FakeCollector();
+  const runtime26 = createMarketDataRuntime({
+    clock: new FakeClock(),
+    staleAfterMs: 60_000,
+    candleStore: candle26,
+    bus: bus26,
+    collectorFactory: () => collector26,
+  });
+
+  await runtime26.start();
+  collector26.emitKline(KLINE_CLOSED);
+  assert.equal(candle26.getSeries('BTCUSDT', '1m', 10).length, 1, 'kline written via collector');
+  runtime26.stop();
+
+  // Direct bus.publish after stop
+  bus26.publish('market.kline.closed', { kline: KLINE_CLOSED, receivedAt: Date.now() });
+  assert.equal(candle26.getSeries('BTCUSDT', '1m', 10).length, 1, 'candleStore unchanged after stop');
+});
+
+// ── 27. default candleStore created when none injected ──────────────────────
+
+test('27. default candleStore created when none injected', () => {
+  const runtime = createMarketDataRuntime({
+    clock: new FakeClock(),
+    staleAfterMs: 60_000,
+    collectorFactory: () => new FakeCollector(),
+  });
+  assert.ok(runtime.candleStore !== undefined);
+  assert.equal(typeof runtime.candleStore.getSeries, 'function');
+});
+
+// ── 28. candleStore is the same instance across restart (default) ───────────
+
+test('28. default candleStore same instance across restart', async () => {
+  const collector28 = new FakeCollector();
+  const runtime28 = createMarketDataRuntime({
+    clock: new FakeClock(),
+    staleAfterMs: 60_000,
+    collectorFactory: () => collector28,
+  });
+  const cs1 = runtime28.candleStore;
+
+  await runtime28.start();
+  runtime28.stop();
+  await runtime28.start();
+  const cs2 = runtime28.candleStore;
+
+  assert.equal(cs1, cs2, 'same candleStore instance throughout lifecycle');
+  runtime28.stop();
 });
