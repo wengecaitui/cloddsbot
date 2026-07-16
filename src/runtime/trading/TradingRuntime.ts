@@ -326,24 +326,15 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
       const p = (async (): Promise<UniverseApplyResult> => {
         // Wait for any pending start to settle first
         if (pendingStartPromise !== null) {
-          const startEpochAtCall = pendingStartEpoch;
           try {
             await pendingStartPromise;
           } catch {
             // start failed — fall through; we may still apply if now running
           }
-          // If start was invalidated by stop, return current state. Note we
-          // compare epoch against applyEpoch (captured at THIS call) so that
-          // a stop during the wait invalidates this apply.
+          // If stop() was called during the wait, epoch will have advanced.
+          // Do NOT use pendingStartEpoch here — a successful start resets it
+          // to -1, which would falsely invalidate this apply.
           if (epoch !== applyEpoch) {
-            return {
-              applied: false,
-              restarted: false,
-              version: appliedPlanVersion,
-              pending: universe.hasPendingPlan(),
-            };
-          }
-          if (pendingStartEpoch !== startEpochAtCall) {
             return {
               applied: false,
               restarted: false,
@@ -353,7 +344,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
           }
         }
 
-        // No pending plan → idempotent no-op
+        // No pending plan → idempotent no-op (start already markApplied)
         if (!universe.hasPendingPlan()) {
           return {
             applied: false,

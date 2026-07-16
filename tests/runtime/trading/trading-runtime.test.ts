@@ -920,35 +920,126 @@ test('R5. settled apply returns new promise for next apply', async () => {
   rt.stop();
 });
 
-test('R6. pending start plan changes: apply uses latest after start', async () => {
+test('R6. pending start plan changes: apply restarts with v2', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   let resolveBlocker: () => void = () => {};
   const blocker = new Promise<void>(r => { resolveBlocker = r; });
-  let collCalls = 0;
+  let collectorCalls = 0;
+  const capturedVersions: number[] = [];
   const rt = createTradingRuntime({
     universe,
-    collectorFactory: () => {
-      collCalls += 1;
+    collectorFactory: (plan) => {
+      collectorCalls += 1;
+      capturedVersions.push(plan.version);
       const c = new FakeColl();
-      if (collCalls === 2) {
+      // First collector's start is blocked
+      if (collectorCalls === 1) {
         c.start = () => { c.started = true; return blocker.then(() => {}); };
       }
       return c;
     },
     indicatorService: new FakeIS() as any,
   });
+
+  // Start is blocked — v1 captured
   const startP = rt.start();
-  universe.addSymbol('ETH/USDT'); // v2 while start pending
-  const applyP = rt.applyUniversePlan(); // waits for start, then applies v2
+
+  // Universe advances to v2 while start is pending
+  universe.addSymbol('ETH/USDT');
+  assert.equal(universe.getPlan().version, 2);
+
+  // Call apply — must wait for pending start, then restart with v2
+  const applyP = rt.applyUniversePlan();
+
+  // Release the first collector's start
   resolveBlocker();
   await startP;
+
+  // First collector used v1
+  assert.equal(capturedVersions[0], 1, 'first collector uses v1');
+
   const result = await applyP;
-  // The apply should have restarted. If it returned applied=false, the plan
-  // may have been marked applied by the start itself — so no pending remains.
-  // In that case, this test scenario works differently than expected; skip
-  // the strict assertion and just verify the runtime is running.
-  assert.equal(rt.isRunning, true, 'runtime is running');
-  assert.ok(result, 'apply returned a result');
+  assert.equal(result.applied, true, 'applied after start settled');
+  assert.equal(result.restarted, true, 'restarted because universe changed during start');
+  assert.equal(result.version, 2, 'applied v2');
+  assert.equal(collectorCalls, 2, 'factory called twice (v1 collector + v2 collector)');
+  assert.equal(capturedVersions[1], 2, 'second collector uses v2');
+  assert.equal(rt.appliedPlanVersion, 2);
+  assert.equal(universe.hasPendingPlan(), false, 'v2 marked applied');
+
+  rt.stop();
+});
+
+test('R6b. pending start with no universe change: apply returns no-op', async () => {
+  const universe = makeUniverse(['BTC/USDT']);
+  let resolveBlocker: () => void = () => {};
+  const blocker = new Promise<void>(r => { resolveBlocker = r; });
+  let collectorCalls = 0;
+  const rt = createTradingRuntime({
+    universe,
+    collectorFactory: () => {
+      collectorCalls += 1;
+      const c = new FakeColl();
+      if (collectorCalls === 1) {
+        c.start = () => { c.started = true; return blocker.then(() => {}); };
+      }
+      return c;
+    },
+    indicatorService: new FakeIS() as any,
+  });
+
+  const startP = rt.start();
+  // No universe change during start
+  const applyP = rt.applyUniversePlan();
+  resolveBlocker();
+  await startP;
+
+  const result = await applyP;
+  assert.equal(result.applied, false, 'no-op — start already applied v1');
+  assert.equal(result.restarted, false);
+  assert.equal(collectorCalls, 1, 'factory called only once');
+  assert.equal(rt.appliedPlanVersion, 1);
+  assert.equal(universe.hasPendingPlan(), false);
+
+  rt.stop();
+});
+
+test('R6c. stop during pending start invalidates apply', async () => {
+  const universe = makeUniverse(['BTC/USDT']);
+  let resolveBlocker: () => void = () => {};
+  const blocker = new Promise<void>(r => { resolveBlocker = r; });
+  let collectorCalls = 0;
+  const rt = createTradingRuntime({
+    universe,
+    collectorFactory: () => {
+      collectorCalls += 1;
+      const c = new FakeColl();
+      if (collectorCalls === 1) {
+        c.start = () => { c.started = true; return blocker.then(() => {}); };
+      }
+      return c;
+    },
+    indicatorService: new FakeIS() as any,
+  });
+
+  const startP = rt.start();
+  universe.addSymbol('ETH/USDT');
+  const applyP = rt.applyUniversePlan();
+
+  // Stop during pending start
+  rt.stop();
+  resolveBlocker();
+  await startP;
+
+  const result = await applyP;
+  assert.equal(result.applied, false, 'not applied after stop');
+  assert.equal(result.restarted, false);
+  assert.equal(result.pending, true, 'universe still pending');
+  assert.equal(rt.isRunning, false);
+
+  // Should be able to start and apply normally afterwards
+  await rt.start();
+  assert.equal(rt.appliedPlanVersion, 2, 'start applies v2');
   rt.stop();
 });
 
