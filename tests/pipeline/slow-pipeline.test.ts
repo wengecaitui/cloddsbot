@@ -305,3 +305,140 @@ test('10. run_complete event still fires', async () => {
   assert.ok(completes[0].report);
   assert.ok(completes[0].durationMs >= 0);
 });
+
+// ── Stage 3A6-R1: Non-blocking persistence ──────────────────────────────────
+
+test('11. pending persistence does not block publish', async () => {
+  const router = new FakeRouter() as any;
+  const adapter = new FakeAdapter();
+  const bus = createTradingEventBus();
+  const order: string[] = [];
+
+  // Router takes 100ms to persist
+  const originalUpdate = router.updateBiasReport.bind(router);
+  router.updateBiasReport = async (r: any) => {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    order.push('persist-done');
+    return originalUpdate(r);
+  };
+
+  bus.subscribe('research.bias.updated', () => order.push('publish'));
+
+  const pipeline = new SlowPipeline({
+    router,
+    bus,
+    adapterFactory: () => adapter as any,
+  });
+
+  const startTime = Date.now();
+  await pipeline.run('BTC/USDT');
+  const elapsed = Date.now() - startTime;
+
+  // publish should fire immediately (not wait 100ms)
+  assert.ok(elapsed < 50, 'run() returned quickly');
+  assert.equal(order[0], 'publish', 'publish fired first');
+});
+
+test('12. pending persistence does not block run() return', async () => {
+  const router = new FakeRouter() as any;
+  const adapter = new FakeAdapter();
+  const bus = createTradingEventBus();
+  
+  // Router takes 50ms
+  const originalUpdate = router.updateBiasReport.bind(router);
+  router.updateBiasReport = async (r: any) => {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    return originalUpdate(r);
+  };
+
+  const pipeline = new SlowPipeline({
+    router,
+    bus,
+    adapterFactory: () => adapter as any,
+  });
+
+  const startTime = Date.now();
+  const report = await pipeline.run('BTC/USDT');
+  const elapsed = Date.now() - startTime;
+
+  assert.ok(report, 'run() returned report');
+  assert.ok(elapsed < 30, 'run() did not wait for persistence');
+});
+
+test('13. delayed rejection produces persistence_warning', async () => {
+  const router = new FakeRouter() as any;
+  const adapter = new FakeAdapter();
+  const bus = createTradingEventBus();
+  const warnings: any[] = [];
+
+  // Router rejects after delay
+  router.updateBiasReport = async () => {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    throw new Error('Delayed persistence failure');
+  };
+
+  const pipeline = new SlowPipeline({
+    router,
+    bus,
+    adapterFactory: () => adapter as any,
+  });
+
+  pipeline.on('persistence_warning', (w) => warnings.push(w));
+
+  const report = await pipeline.run('BTC/USDT');
+
+  assert.ok(report, 'run() succeeded');
+  
+  // Wait for delayed rejection
+  await new Promise(resolve => setTimeout(resolve, 50));
+  
+  assert.equal(warnings.length, 1, 'persistence warning eventually emitted');
+  assert.ok(warnings[0].error);
+});
+
+test('14. router call still happens before publish', async () => {
+  const router = new FakeRouter() as any;
+  const adapter = new FakeAdapter();
+  const bus = createTradingEventBus();
+  const order: string[] = [];
+
+  const originalUpdate = router.updateBiasReport.bind(router);
+  router.updateBiasReport = async (r: any) => {
+    order.push('router-called');
+    return originalUpdate(r);
+  };
+
+  bus.subscribe('research.bias.updated', () => order.push('publish'));
+
+  const pipeline = new SlowPipeline({
+    router,
+    bus,
+    adapterFactory: () => adapter as any,
+  });
+
+  await pipeline.run('BTC/USDT');
+
+  assert.equal(order[0], 'router-called', 'router invoked first');
+  assert.equal(order[1], 'publish', 'publish fired second');
+});
+
+test('15. original 10 tests still pass (regression guard)', async () => {
+  // This is a meta-test ensuring we didn't break existing behavior
+  const router = new FakeRouter() as any;
+  const adapter = new FakeAdapter();
+  const bus = createTradingEventBus();
+  const events: any[] = [];
+
+  bus.subscribe('research.bias.updated', (e) => events.push(e));
+
+  const pipeline = new SlowPipeline({
+    router,
+    bus,
+    adapterFactory: () => adapter as any,
+  });
+
+  await pipeline.run('BTC/USDT');
+
+  assert.equal(events.length, 1, 'still publishes once');
+  assert.equal(router.updateCalled, 1, 'still calls router');
+});

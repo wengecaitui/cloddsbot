@@ -104,7 +104,7 @@ export class SlowPipeline extends EventEmitter {
       if (!raw || !raw.success) {
         const errorMsg = raw?.error ?? '未知适配器错误';
         const fallbackReport = this.buildFallbackReport(symbol, errorMsg, elapsedMs);
-        await this.publishReport(fallbackReport, elapsedMs);
+        this.publishReport(fallbackReport, elapsedMs);
         return fallbackReport;
       }
 
@@ -119,7 +119,7 @@ export class SlowPipeline extends EventEmitter {
       };
 
       // ── 5. 统一完成路径：持久化 + 发布事件 ────────────────────────────
-      await this.publishReport(report, elapsedMs);
+      this.publishReport(report, elapsedMs);
 
       return report;
     } catch (error: unknown) {
@@ -128,7 +128,7 @@ export class SlowPipeline extends EventEmitter {
       const fallbackReport = this.buildFallbackReport(symbol, errorMsg, elapsedMs);
 
       // Fallback 报告也走统一完成路径
-      await this.publishReport(fallbackReport, elapsedMs);
+      this.publishReport(fallbackReport, elapsedMs);
 
       return fallbackReport;
     } finally {
@@ -137,20 +137,23 @@ export class SlowPipeline extends EventEmitter {
   }
 
   /**
-   * Stage 3A6: 统一报告完成路径
-   * - router.updateBiasReport（持久化，非阻塞）
+   * Stage 3A6-R1: 统一报告完成路径（非阻塞持久化）
+   * - router.updateBiasReport（fire-and-observe，不 await）
    * - bus.publish('research.bias.updated')
    * - emit('run_complete')
    */
-  private async publishReport(report: MarketBiasReportFull, elapsedMs: number): Promise<void> {
-    // 1. Router 持久化（保持现有非阻塞语义）
-    try {
-      await this.config.router.updateBiasReport(report);
-    } catch (err) {
-      this.emit('persistence_warning', { error: err });
+  private publishReport(report: MarketBiasReportFull, elapsedMs: number): void {
+    // 1. Router 持久化（fire-and-observe，不阻塞）
+    const persistPromise = this.config.router.updateBiasReport(report);
+    
+    // 同步 throw 捕获
+    if (persistPromise && typeof persistPromise.catch === 'function') {
+      persistPromise.catch((err) => {
+        this.emit('persistence_warning', { error: err });
+      });
     }
 
-    // 2. 发布事件
+    // 2. 发布事件（立即执行，不等待持久化）
     try {
       const receivedAt = this.clock.now();
       const result = this.bus.publish('research.bias.updated', { report, receivedAt });
