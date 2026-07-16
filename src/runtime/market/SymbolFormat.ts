@@ -1,4 +1,4 @@
-// Stage 3B1A: Canonical ↔ exchange symbol mapping
+// Stage 3B1A-R1: Canonical ↔ exchange symbol mapping
 // No automatic format guessing — only explicitly registered pairs.
 // Canonical format: BASE/QUOTE (e.g. BTC/USDT).
 // Exchange format: exchange-specific (e.g. BTCUSDT for Bitget).
@@ -7,8 +7,8 @@ const CANONICAL_RE = /^[A-Z][A-Z0-9]{0,20}\/[A-Z][A-Z0-9]{0,20}$/;
 const EXCHANGE_RE = /^\S+$/;
 
 export interface SymbolMapping {
-  canonical: string;   // BTC/USDT
-  exchange: string;    // BTCUSDT
+  canonical: string;
+  exchange: string;
 }
 
 export interface SymbolRegistry {
@@ -19,15 +19,13 @@ export interface SymbolRegistry {
   mappings(): readonly SymbolMapping[];
 }
 
-function idx(len: number, n: number): number {
-  return ((n % len) + len) % len;
-}
-
 export function createSymbolRegistry(mappings: readonly SymbolMapping[]): SymbolRegistry {
   if (!Array.isArray(mappings) || mappings.length === 0) {
     throw new Error('SymbolRegistry: at least one mapping required');
   }
 
+  // Snapshot inputs immediately — caller can't mutate later
+  const snapshot: Array<{ canonical: string; exchange: string }> = [];
   const canonMap = new Map<string, string>();
   const exchMap = new Map<string, string>();
 
@@ -36,7 +34,6 @@ export function createSymbolRegistry(mappings: readonly SymbolMapping[]): Symbol
     const c = m.canonical;
     const e = m.exchange;
 
-    // Validate canonical: must match BASE/QUOTE
     if (typeof c !== 'string' || !CANONICAL_RE.test(c)) {
       throw new Error(
         `SymbolRegistry: invalid canonical format "${c}" — ` +
@@ -44,7 +41,6 @@ export function createSymbolRegistry(mappings: readonly SymbolMapping[]): Symbol
       );
     }
 
-    // Validate exchange: non-empty, no whitespace
     if (typeof e !== 'string' || !EXCHANGE_RE.test(e)) {
       throw new Error(
         `SymbolRegistry: invalid exchange format "${e}" — ` +
@@ -53,18 +49,15 @@ export function createSymbolRegistry(mappings: readonly SymbolMapping[]): Symbol
     }
 
     if (canonMap.has(c)) {
-      throw new Error(
-        `SymbolRegistry: duplicate canonical "${c}"`
-      );
+      throw new Error(`SymbolRegistry: duplicate canonical "${c}"`);
     }
     if (exchMap.has(e)) {
-      throw new Error(
-        `SymbolRegistry: duplicate exchange "${e}"`
-      );
+      throw new Error(`SymbolRegistry: duplicate exchange "${e}"`);
     }
 
     canonMap.set(c, e);
     exchMap.set(e, c);
+    snapshot.push({ canonical: c, exchange: e });
   }
 
   return {
@@ -93,7 +86,7 @@ export function createSymbolRegistry(mappings: readonly SymbolMapping[]): Symbol
     },
 
     mappings(): readonly SymbolMapping[] {
-      return mappings.map(m => ({ canonical: m.canonical, exchange: m.exchange }));
+      return snapshot.map(s => ({ canonical: s.canonical, exchange: s.exchange }));
     },
   };
 }

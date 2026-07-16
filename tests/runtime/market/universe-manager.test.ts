@@ -341,3 +341,149 @@ test('UM22. research blacklist does not modify hardBlacklist', () => {
   const r2 = um.applyResearchReport(report2);
   assert.equal(r2.changed, true, 'SOL/USDT can be re-added by new report');
 });
+
+// ── Stage 3B1A-R1: Construction invariants ──────────────────────────────────
+
+test('R1. maxSymbols 0 rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), maxSymbols: 0,
+  }), /maxSymbols must be a positive integer/);
+});
+
+test('R2. maxSymbols negative rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), maxSymbols: -1,
+  }), /maxSymbols must be a positive integer/);
+});
+
+test('R3. maxSymbols NaN rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), maxSymbols: NaN,
+  }), /maxSymbols must be a positive integer/);
+});
+
+test('R4. maxSymbols Infinity rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), maxSymbols: Infinity,
+  }), /maxSymbols must be a positive integer/);
+});
+
+test('R5. maxSymbols float rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), maxSymbols: 1.5,
+  }), /maxSymbols must be a positive integer/);
+});
+
+test('R6. staticSymbols exceeds maxSymbols', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(),
+    staticSymbols: ['BTC/USDT', 'ETH/USDT'],
+    maxSymbols: 1,
+  }), /exceeds maxSymbols/);
+});
+
+test('R7. empty allowedIntervals rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), allowedIntervals: [],
+  }), /allowedIntervals must be a non-empty array/);
+});
+
+test('R8. empty defaultIntervals rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(), defaultIntervals: [],
+  }), /defaultIntervals must be a non-empty array/);
+});
+
+test('R9. setPlan explicit empty intervals rejects', () => {
+  const um = createUniverseManager({ ...defaultConfig(), staticSymbols: ['BTC/USDT'] });
+  assert.throws(() => um.setPlan({
+    entries: [{ symbol: 'ETH/USDT', intervals: [] }],
+  }), /must be non-empty/);
+});
+
+test('R10. addSymbol explicit empty intervals rejects', () => {
+  const um = createUniverseManager({ ...defaultConfig(), staticSymbols: ['BTC/USDT'] });
+  assert.throws(() => um.addSymbol('ETH/USDT', []), /must be non-empty/);
+});
+
+test('R11. unregistered allowedSymbols rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(),
+    allowedSymbols: ['BTC/USDT', 'FAKE/COIN'],
+    staticSymbols: ['BTC/USDT'],
+  }), /contains unregistered canonical/);
+});
+
+test('R12. duplicate staticSymbols deduped, does not double-count', () => {
+  // Duplicate staticSymbols should be deduped and not cause a duplicate-add error
+  const um = createUniverseManager({
+    ...defaultConfig(),
+    staticSymbols: ['BTC/USDT', 'BTC/USDT', 'ETH/USDT'],
+  });
+  const plan = um.getPlan();
+  assert.equal(plan.entries.length, 2, 'deduped to 2');
+});
+
+test('R13. setPlan duplicate symbol atomically rejects', () => {
+  const um = createUniverseManager({ ...defaultConfig(), staticSymbols: ['BTC/USDT'] });
+  const planBefore = um.getPlan();
+  assert.throws(() => um.setPlan({
+    entries: [
+      { symbol: 'ETH/USDT' },
+      { symbol: 'ETH/USDT' },  // duplicate
+    ],
+  }), /duplicate plan symbol/);
+  const planAfter = um.getPlan();
+  assert.equal(planAfter.version, planBefore.version, 'version unchanged');
+  assert.deepEqual(planAfter.entries, planBefore.entries, 'plan unchanged');
+});
+
+test('R14. input mappings mutation does not affect registry', () => {
+  const input: Array<{ canonical: string; exchange: string }> = [
+    { canonical: 'BTC/USDT', exchange: 'BTCUSDT' },
+    { canonical: 'ETH/USDT', exchange: 'ETHUSDT' },
+  ];
+  const r = createSymbolRegistry(input);
+  // Mutate input after creation
+  input[0] = { canonical: 'SOL/USDT', exchange: 'SOLUSDT' };
+  input.length = 0;
+  // Registry should still return original mappings
+  const maps = r.mappings();
+  assert.equal(maps.length, 2, 'still has 2 entries');
+  assert.equal(maps[0].canonical, 'BTC/USDT', 'canonical unchanged');
+  assert.equal(maps[0].exchange, 'BTCUSDT', 'exchange unchanged');
+  assert.equal(r.toExchange('BTC/USDT'), 'BTCUSDT', 'lookup still works');
+});
+
+test('R15. all rejection paths leave plan/version/pending unchanged', () => {
+  const um = createUniverseManager(defaultConfig());
+  const planBefore = um.getPlan();
+  const errs: Array<() => void> = [
+    () => um.setPlan({ entries: [{ symbol: 'SOL/USDT', intervals: [] }] }),
+    () => um.setPlan({ entries: [{ symbol: 'SOL/USDT', intervals: ['7d'] }] }),
+    () => um.setPlan({ entries: [{ symbol: 'FAKE/COIN' }] }),
+    () => um.addSymbol('FAKE/COIN'),
+    () => um.addSymbol('SOL/USDT', []),
+    () => um.addSymbol('SOL/USDT', ['7d']),
+  ];
+  for (const fn of errs) {
+    assert.throws(fn);
+    const planAfter = um.getPlan();
+    assert.equal(planAfter.version, planBefore.version, `version unchanged after ${fn.name}`);
+    assert.equal(planAfter.entries.length, planBefore.entries.length, `entries unchanged after ${fn.name}`);
+  }
+});
+
+test('R16. allowedIntervals duplicates rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(),
+    allowedIntervals: ['1m', '5m', '1m'],
+  }), /allowedIntervals contains duplicates/);
+});
+
+test('R17. hardBlacklist unregistered rejects', () => {
+  assert.throws(() => createUniverseManager({
+    ...defaultConfig(),
+    hardBlacklist: ['FAKE/COIN'],
+  }), /contains unregistered canonical/);
+});
