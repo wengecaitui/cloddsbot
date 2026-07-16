@@ -805,12 +805,18 @@ test('42. stale socket message ignored', async () => {
   ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
   ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
   await p;
+
+  // Capture the live handler bound to the OLD generation (before it is nulled).
+  const oldHandler = ws.onmessage;
+  assert.ok(oldHandler, 'pre-reconnect handler should exist');
+
   // Reconnect → generation++
   ws.onclose?.({});
   s.tick(1000);
   await new Promise(r => queueMicrotask(r));
-  // Send ticker on OLD socket — should be ignored
-  ws.onmessage!({ data: tickerData('BTCUSDT', '50000', '1700000000000') });
+
+  // Invoke the captured handler directly — generation guard inside rejects it.
+  oldHandler!({ data: tickerData('BTCUSDT', '50000', '1700000000000') });
   assert.equal(tickers.length, 0);
 });
 
@@ -944,3 +950,317 @@ test('50. no real timer waits', () => {
 function plan2(version: number, entries: Array<{ symbol: string; exchangeSymbol: string; intervals: string[] }>): SubscriptionPlan {
   return { version, entries: entries.map(e => ({ ...e, ticker: true })) };
 }
+
+
+// ── Stage 3B2B-R1: socket retirement, reconnect hardening, ack split ──────
+
+test('R1. heartbeat send throw retires socket', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, heartbeatIntervalMs: 1000, pongTimeoutMs: 500, reconnectDelayMs: 1000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: "USDT-FUTURES", channel: "ticker", instId: "BTCUSDT" }) });
+  ws.onmessage!({ data: ackMsg({ instType: "USDT-FUTURES", channel: "candle1m", instId: "BTCUSDT" }) });
+  await p;
+  ws.send = () => { throw new Error("send fail"); };
+  s.tick(1000);
+  assert.equal(ws.onopen, null, "onopen nulled");
+  assert.equal(ws.onmessage, null, "onmessage nulled");
+  c.stop();
+});
+
+
+test('R2. pong timeout retires the socket', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, heartbeatIntervalMs: 1000, pongTimeoutMs: 500, reconnectDelayMs: 10000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  s.tick(1000);
+  s.tick(500);
+  assert.equal(c.state, 'reconnect_wait');
+  c.stop();
+});
+
+test('R3. running onerror retires socket', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 10000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onerror!(null);
+  assert.equal(ws.onmessage, null, 'onmessage nulled via retire');
+  assert.equal(c.state, 'reconnect_wait');
+  c.stop();
+});
+
+test('R4. protocol error in running retires socket', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 10000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onmessage!({ data: JSON.stringify({ event: 'error', code: '30001', msg: 'protocol issue' }) });
+  assert.equal(ws.onmessage, null);
+  assert.equal(c.state, 'reconnect_wait');
+  c.stop();
+});
+
+test('R5. reconnect send throw retired', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 100 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onclose?.({}); s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(f.createdSockets.length, 2);
+  c.stop();
+});
+
+test('R6. reconnect ack timeout retries', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 100, ackTimeoutMs: 100 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onclose?.({}); s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  s.tick(100);
+  assert.equal(c.state, 'reconnect_wait');
+  c.stop();
+});
+
+test('R7. WS factory throw schedules another reconnect', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  let callCount = 0;
+  const origCreate = f.create.bind(f);
+  (f as any).create = function(url: string) {
+    callCount++;
+    if (callCount === 3) throw new Error('factory fail');
+    return origCreate(url);
+  };
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 100 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onclose?.({}); s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(f.createdSockets.length, 2);
+  f.createdSockets[1].onclose?.({}); s.tick(100);
+  assert.equal(c.state, 'reconnect_wait', 'back to reconnect wait');
+  c.stop();
+});
+
+test('R8. onerror + onclose only one reconnect', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 10000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onerror!(null);
+  ws.onclose?.({});
+  assert.equal(c.state, 'reconnect_wait');
+  c.stop();
+});
+
+test('R9. stale gen beginReconnect no-op', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 5000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  (c as any).beginReconnect(0);
+  assert.equal(c.state, 'running');
+  c.stop();
+});
+
+test('R10. reconnect creates new socket only after retire', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 500 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onclose?.({});
+  s.tick(500);
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(ws.onopen, null, 'old onopen nulled');
+  assert.equal(ws.onclose, null, 'old onclose nulled');
+  assert.equal(f.createdSockets.length, 2);
+  c.stop();
+});
+
+test('R11. stale old onmessage rejected by generation', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const tickers: any[] = [];
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 500 });
+  c.onTicker(t => tickers.push(t));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  const oldHandler = ws.onmessage;
+  ws.onclose?.({}); s.tick(500);
+  await new Promise(r => queueMicrotask(r));
+  oldHandler!({ data: tickerData('BTCUSDT', '50000', '1700000000000') });
+  assert.equal(tickers.length, 0);
+  c.stop();
+});
+
+test('R12. stale old onclose does not reschedule', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 1000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  const oldClose = ws.onclose;
+  ws.onclose?.({}); s.tick(1000);
+  await new Promise(r => queueMicrotask(r));
+  const socketsBefore = f.createdSockets.length;
+  oldClose!({});
+  assert.equal(f.createdSockets.length, socketsBefore);
+  c.stop();
+});
+
+test('R13. unsubscribe ack does not reduce pending', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, ackTimeoutMs: 500 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: JSON.stringify({ event: 'unsubscribe', arg: { instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' } }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  assert.equal(c.state, 'subscribing');
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  await p;
+  assert.equal(c.state, 'running');
+  c.stop();
+});
+
+test('R14. only unsubscribe acks fail startup', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, ackTimeoutMs: 100 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: JSON.stringify({ event: 'unsubscribe', arg: { instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' } }) });
+  ws.onmessage!({ data: JSON.stringify({ event: 'unsubscribe', arg: { instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' } }) });
+  // Trigger ack timeout — subscribe acks never arrived, pending stays full
+  s.tick(100);
+  let rejected = false;
+  try { await p; } catch { rejected = true; }
+  assert.ok(rejected);
+  c.stop();
+});
+
+test('R15. detector advances without kline handler', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const klines: any[] = [];
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '1000') });
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '2000') });
+  c.onKline(k => klines.push(k));
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '3000') });
+  assert.equal(klines.length, 1);
+  assert.equal(klines[0].ts, 2000);
+  c.stop();
+});
+
+test('R16. late handler only future candles', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const klines: any[] = [];
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '1000') });
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '2000') });
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '3000') });
+  c.onKline(k => klines.push(k));
+  ws.onmessage!({ data: candleData('BTCUSDT', 'candle1m', '4000') });
+  assert.equal(klines.length, 1);
+  assert.equal(klines[0].ts, 3000);
+  c.stop();
+});
+
+test('R17. stop clears reconnect timer and closes socket', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s, reconnectDelayMs: 5000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  const ws = f.createdSockets[0];
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  await p;
+  ws.onclose?.({});
+  c.stop();
+  assert.equal(c.state, 'stopped');
+  assert.equal(f.createdSockets.length, 1);
+});
+
+test('R18. meta — collector still constructs', () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BitgetV2PublicCollector({ plan: ONE_SYMBOL_PLAN, webSocketFactory: (url: string) => f.create(url), scheduler: s });
+  assert.equal(c.state, 'idle');
+  assert.equal(c.planVersion, 1);
+});

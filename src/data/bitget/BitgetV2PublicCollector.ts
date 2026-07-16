@@ -1,5 +1,6 @@
-// Stage 3B2B: Bitget V2 Public Collector
+// Stage 3B2B + 3B2B-R1: Bitget V2 Public Collector
 // Completes the V2 protocol pipeline: planner → WS → parser → close detect → WsTicker/WsKline
+// 3B2B-R1: unified socket retirement, single reconnect entry, strict ack event split.
 
 import type { SubscriptionPlan } from '../../runtime/market/UniverseManager';
 import type { WsTicker, WsKline } from '../types';
@@ -230,7 +231,8 @@ export class BitgetV2PublicCollector {
         if (this.expectedAckKeys.size > 0) {
           this.ackTimerHandle = this.scheduler.setTimeout(() => {
             if (this.generation === gen && !this.manualStop) {
-              this.handleStartupError(gen, true, { phase: 'subscribe', error: new Error(`ack timeout: ${this.expectedAckKeys.size} pending keys`) });
+              const pending = this.expectedAckKeys.size;
+              this.handleStartupError(gen, true, { phase: 'subscribe', error: new Error(`ack timeout: ${pending} pending keys`) });
             }
           }, this.options.ackTimeoutMs);
         } else {
@@ -252,16 +254,16 @@ export class BitgetV2PublicCollector {
           return;
         }
         // Otherwise reconnect (only if initial start already succeeded)
-        this.scheduleReconnect(gen);
+        this.beginReconnect(gen);
       };
 
       ws.onerror = () => {
         if (this.generation !== gen || this.manualStop) return;
         // Firefox creates ws with error state before onopen fires — ignore if
         // still connecting; onclose will handle the failure.
-        // If already running, schedule reconnect.
+        // If already running, schedule reconnect via unified entry.
         if (this._state === 'running') {
-          this.scheduleReconnect(gen);
+          this.beginReconnect(gen);
         }
       };
     });
@@ -274,9 +276,9 @@ export class BitgetV2PublicCollector {
   stop(): void {
     if (this._state === 'stopped') return;
     this.manualStop = true;
-    this.generation += 1;
+    // Invalidate any existing connection immediately (same as retirement)
+    this.retireActiveConnection(this.generation);
     this._state = 'stopped';
-
     this.clearTimers();
     this.closeDetector.clear();
 
@@ -287,15 +289,6 @@ export class BitgetV2PublicCollector {
       this.startResolve = null;
       this.startReject = null;
       reject(new Error('BitgetV2PublicCollector: collector is stopped'));
-    }
-
-    if (this.ws) {
-      this.ws.onopen = null;
-      this.ws.onmessage = null;
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      try { this.ws.close(); } catch { /* ignore */ }
-      this.ws = null;
     }
   }
 
@@ -320,15 +313,38 @@ export class BitgetV2PublicCollector {
     if (this.reconnectTimerHandle !== undefined) { this.scheduler.clearTimeout(this.reconnectTimerHandle); this.reconnectTimerHandle = undefined; }
   }
 
+  /**
+   * Unconditionally invalidate and close the active connection tied to `expectedGeneration`.
+   * Returns false (no side effects) if generation does not match (stale call).
+   */
+  private retireActiveConnection(expectedGeneration: number): boolean {
+    if (this.generation !== expectedGeneration) return false;
+
+    // 1. Clear timers
+    this.clearTimers();
+
+    // 2. Invalidate generation immediately — old socket callbacks & timers die
+    this.generation += 1;
+
+    // 3. Capture current socket
+    const captured = this.ws;
+    if (captured) {
+      // 4-6. Detach handlers + null out reference if still pointing at captured
+      captured.onopen = null;
+      captured.onmessage = null;
+      captured.onclose = null;
+      captured.onerror = null;
+      if (this.ws === captured) this.ws = null;
+      // 7. Close (swallow errors)
+      try { captured.close(); } catch { /* ignore */ }
+    }
+    return true;
+  }
+
   private handleStartupError(gen: number, clearPromise: boolean, failure: BitgetCollectorFailure): void {
     if (this.generation !== gen || this.manualStop) return;
-    this.clearTimers();
+    this.retireActiveConnection(gen);
     this._state = 'failed';
-    if (this.ws) {
-      this.ws.onopen = null; this.ws.onmessage = null; this.ws.onclose = null; this.ws.onerror = null;
-      try { this.ws.close(); } catch { /* ignore */ }
-      this.ws = null;
-    }
     if (clearPromise && this.startReject) {
       const reject = this.startReject;
       this.startPromise = null;
@@ -355,6 +371,35 @@ export class BitgetV2PublicCollector {
     this.scheduleHeartbeat(gen);
   }
 
+  // ── Unified reconnect entry ──────────────────────────────────────────────
+
+  private beginReconnect(expectedGeneration: number, failure?: BitgetCollectorFailure): void {
+    if (this.manualStop) return;
+    if (this._state === 'stopped' || this._state === 'failed') return;
+    if (this.generation !== expectedGeneration) return;
+
+    // Report failure once (if any)
+    if (failure) this.safeReport(failure.phase, failure.error);
+
+    // Retire the faulted connection (clears timers, bumps generation, detaches + closes ws)
+    this.retireActiveConnection(expectedGeneration);
+
+    // Avoid duplicate reconnect timer
+    if (this.reconnectTimerHandle !== undefined) return;
+
+    this._state = 'reconnect_wait';
+    const waitGeneration = this.generation;
+
+    this.reconnectTimerHandle = this.scheduler.setTimeout(() => {
+      // Timer fired — clear handle first
+      this.reconnectTimerHandle = undefined;
+      if (this.generation !== waitGeneration || this.manualStop) return;
+      this._state = 'connecting';
+      const newGeneration = ++this.generation;
+      this.startReconnectAttempt(newGeneration);
+    }, this.options.reconnectDelayMs);
+  }
+
   // ── Message processing ──────────────────────────────────────────────────
 
   private onMessage(data: unknown, gen: number): void {
@@ -374,7 +419,7 @@ export class BitgetV2PublicCollector {
           this.onPong(gen);
           break;
         case 'ack':
-          this.onAck(frame.arg, gen);
+          this.onAck(frame.event, frame.arg, gen);
           break;
         case 'error':
           this.onProtocolError(frame, gen);
@@ -395,18 +440,22 @@ export class BitgetV2PublicCollector {
     }
   }
 
-  private onAck(arg: { instType: string; channel: string; instId: string }, gen: number): void {
+  private onAck(event: 'subscribe' | 'unsubscribe', arg: { instType: string; channel: string; instId: string }, gen: number): void {
     if (this.generation !== gen || this._state !== 'subscribing') return;
+
+    // Only subscribe acks advance startup pending set. unsubscribe acks ignored.
+    if (event !== 'subscribe') return;
+
     const key = ackKey(arg);
-    if (this.expectedAckKeys.has(key)) {
-      this.expectedAckKeys.delete(key);
-      if (this.expectedAckKeys.size === 0) {
-        this.scheduler.clearTimeout(this.ackTimerHandle);
-        this.ackTimerHandle = undefined;
-        this.enterRunning(gen);
-      }
+    // duplicate / unknown subscribe ack → no-op (does not reduce pending)
+    if (!this.expectedAckKeys.has(key)) return;
+
+    this.expectedAckKeys.delete(key);
+    if (this.expectedAckKeys.size === 0) {
+      this.scheduler.clearTimeout(this.ackTimerHandle);
+      this.ackTimerHandle = undefined;
+      this.enterRunning(gen);
     }
-    // unknown or duplicate ack → ignore
   }
 
   private onProtocolError(frame: { message: string; code: string }, gen: number): void {
@@ -416,14 +465,8 @@ export class BitgetV2PublicCollector {
       return;
     }
     if (this._state === 'running') {
-      this.safeReport('subscribe', new Error(`${frame.code} ${frame.message}`));
-      // Close current socket and reconnect
-      this.clearTimers();
-      if (this.ws) {
-        this.ws.onclose = null; // prevent double-trigger
-        try { this.ws.close(); } catch { /* ignore */ }
-      }
-      this.scheduleReconnect(gen);
+      // Unified reconnect entry — retires connection and schedules reconnect
+      this.beginReconnect(gen, { phase: 'subscribe', error: new Error(`${frame.code} ${frame.message}`) });
     }
   }
 
@@ -458,11 +501,13 @@ export class BitgetV2PublicCollector {
       }
     }
 
-    // Dispatch candles via close detector
-    if (candleUpdates.length > 0 && this.klineHandler) {
+    // Detector ALWAYS advances, even without a registered kline handler.
+    if (candleUpdates.length > 0) {
       const closed = this.closeDetector.ingestMany(candleUpdates);
-      for (const k of closed) {
-        try { this.klineHandler(k); } catch (err: any) { this.safeReport('parse', err); }
+      if (this.klineHandler) {
+        for (const k of closed) {
+          try { this.klineHandler(k); } catch (err: any) { this.safeReport('parse', err); }
+        }
       }
     }
   }
@@ -481,7 +526,7 @@ export class BitgetV2PublicCollector {
       } catch (err: any) {
         this.safeReport('heartbeat', err);
         this.clearTimers();
-        this.scheduleReconnect(gen);
+        this.beginReconnect(gen, { phase: 'heartbeat', error: err });
         return;
       }
 
@@ -489,12 +534,7 @@ export class BitgetV2PublicCollector {
       this.pongTimerHandle = this.scheduler.setTimeout(() => {
         if (this.generation !== gen || this.manualStop) return;
         this.safeReport('heartbeat', new Error('pong timeout'));
-        this.clearTimers();
-        if (this.ws) {
-          this.ws.onclose = null;
-          try { this.ws.close(); } catch { /* ignore */ }
-        }
-        this.scheduleReconnect(gen);
+        this.beginReconnect(gen, { phase: 'heartbeat', error: new Error('pong timeout') });
       }, this.options.pongTimeoutMs);
     }, this.options.heartbeatIntervalMs);
   }
@@ -511,30 +551,15 @@ export class BitgetV2PublicCollector {
 
   // ── Reconnect ──────────────────────────────────────────────────────────
 
-  private scheduleReconnect(gen: number): void {
-    if (this.generation !== gen || this.manualStop) return;
-    if (this._state === 'failed' || this._state === 'stopped') return;
-    this._state = 'reconnect_wait';
-    this.clearTimers();
-
-    this.reconnectTimerHandle = this.scheduler.setTimeout(() => {
-      if (this.generation !== gen || this.manualStop) return;
-      this._state = 'connecting';
-
-      const reconnectGen = ++this.generation;
-      this.startReconnectAttempt(reconnectGen);
-    }, this.options.reconnectDelayMs);
-  }
-
   private startReconnectAttempt(gen: number): void {
-    if (this.manualStop) return;
+    if (this.generation !== gen || this.manualStop) return;
 
     let ws: BitgetWebSocketLike;
     try {
       ws = this.wsFactory(this.options.endpoint);
     } catch (err: any) {
       this.safeReport('reconnect', err);
-      this.scheduleReconnect(this.generation);
+      this.beginReconnect(this.generation, { phase: 'reconnect', error: err });
       return;
     }
 
@@ -548,44 +573,43 @@ export class BitgetV2PublicCollector {
       }
     }
 
-    const handleOpen = () => {
-      if (this.generation !== gen || this.manualStop) return;
-      // Send batches
-      for (const req of this.capturedRequests) {
-        try { ws.send(JSON.stringify(req)); } catch (err: any) {
-          this.safeReport('reconnect', err);
-          this.scheduleReconnect(this.generation);
-          return;
-        }
-      }
-
-      if (this.expectedAckKeys.size > 0) {
-        this.ackTimerHandle = this.scheduler.setTimeout(() => {
-          if (this.generation === gen && !this.manualStop) {
-            this.safeReport('reconnect', new Error(`reconnect ack timeout: ${this.expectedAckKeys.size} pending`));
-            this.scheduleReconnect(this.generation);
+    const setHandlersForReconnect = () => {
+      ws.onopen = () => {
+        if (this.generation !== gen || this.manualStop) return;
+        this._state = 'subscribing';
+        for (const req of this.capturedRequests) {
+          try { ws.send(JSON.stringify(req)); } catch (err: any) {
+            this.safeReport('reconnect', err);
+            this.beginReconnect(this.generation, { phase: 'reconnect', error: err });
+            return;
           }
-        }, this.options.ackTimeoutMs);
-      } else {
-        this.enterRunning(gen);
-      }
+        }
+        if (this.expectedAckKeys.size > 0) {
+          this.ackTimerHandle = this.scheduler.setTimeout(() => {
+            if (this.generation === gen && !this.manualStop) {
+              this.safeReport('reconnect', new Error(`reconnect ack timeout: ${this.expectedAckKeys.size} pending`));
+              this.beginReconnect(this.generation, { phase: 'reconnect', error: new Error('reconnect ack timeout') });
+            }
+          }, this.options.ackTimeoutMs);
+        } else {
+          this.enterRunning(gen);
+        }
+      };
+      ws.onmessage = (event: { data: unknown }) => {
+        if (this.generation !== gen || this.manualStop) return;
+        this.onMessage(event.data, gen);
+      };
+      ws.onclose = () => {
+        if (this.generation !== gen || this.manualStop) return;
+        this.beginReconnect(this.generation);
+      };
+      ws.onerror = () => {
+        if (this.generation !== gen || this.manualStop) return;
+        // Always reconnect on error (unified entry)
+        this.beginReconnect(this.generation);
+      };
     };
 
-    const handleMessage = (event: { data: unknown }) => {
-      if (this.generation !== gen || this.manualStop) return;
-      this.onMessage(event.data, gen);
-    };
-
-    const handleClose = () => {
-      if (this.generation !== gen || this.manualStop) return;
-      this.scheduleReconnect(this.generation);
-    };
-
-    ws.onopen = handleOpen;
-    ws.onmessage = handleMessage;
-    ws.onclose = handleClose;
-    ws.onerror = () => {
-      if (this.generation !== gen || this.manualStop) return;
-    };
+    setHandlersForReconnect();
   }
 }
