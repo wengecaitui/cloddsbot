@@ -11,6 +11,10 @@
  * ⚠️ 当前为骨架（Mock）实现
  * Phase 3b: 替换为真实 Brale 技术分析
  * Phase 4: Python bridge for 精度关键指标
+ *
+ * Stage 3A4: 可选 marketData 注入 —— 在 IndicatorService 之前
+ *   校验 Snapshot + CandleSeries 同步性，并把历史 OHLCV 喂给指标计算。
+ *   未配置 marketData → 完全兼容旧行为。
  */
 
 import { EventEmitter } from 'events';
@@ -19,6 +23,22 @@ import { ExecutionRouter } from '../router/ExecutionRouter';
 import { MarketBiasReportFull } from '../types/market-bias';
 import { evaluate as decisionEngineEvaluate } from './DecisionEngine';
 import type { EngineInput } from './DecisionEngine';
+import type { MarketSnapshotStore } from '../data/MarketSnapshot';
+import type { CandleSeriesStore } from '../data/CandleSeriesStore';
+import type { Series } from '../data/types';
+
+export interface FastPipelineMarketData {
+  snapshotStore: MarketSnapshotStore;
+  candleStore: CandleSeriesStore;
+  /** 目标 K 线周期（默认 1m） */
+  interval?: string;
+  /** warm-up 最低 K 线数（默认 100） */
+  minimumSeries?: number;
+  /** 送计算的 K 线数上限（默认 200，必须 >= minimumSeries） */
+  seriesLimit?: number;
+  /** 单根 K 线最大年龄（默认 120000ms = 2min） */
+  maxKlineAgeMs?: number;
+}
 
 export interface FastPipelineConfig {
   router: ExecutionRouter;
@@ -28,6 +48,8 @@ export interface FastPipelineConfig {
   model?: string;
   /** 模拟延迟（毫秒），仅用于测试/基准；生产默认 0 */
   mockLatencyMs?: number;
+  /** Stage 3A4: 可选市场数据源（Snapshot + CandleSeries） */
+  marketData?: FastPipelineMarketData;
 }
 
 export interface FastPipelineResult {
@@ -66,7 +88,8 @@ export class FastPipeline extends EventEmitter {
    *  1. 读取 MarketBiasReport（路由层已注入）
    *  2. 注入技术分析（mock → Phase 3b 真实 Brale）
    *  3. Risk Team 硬限制拦截
-   *  4. 返回决策
+   *  4. [Stage 3A4] 可选市场数据守卫 + 喂 OHLCV 序列
+   *  5. Decision Engine (replaceable rules — pure function, no hidden state)
    */
   async execute(signal: {
     source: string;
@@ -125,11 +148,117 @@ export class FastPipeline extends EventEmitter {
       }
     }
 
-    // Step 4: 技术指标计算（通过 IndicatorService 抽象 — 底层可以是 PythonBridge、mock 或任何实现）
+    // Step 4: [Stage 3A4] 市场数据守卫 + OHLCV 序列注入
+    const md = this.config.marketData;
+    let series: Series[] | null = null;
+
+    if (md) {
+      const interval = md.interval ?? '1m';
+      const minimumSeries = md.minimumSeries ?? 100;
+      const seriesLimit = md.seriesLimit ?? 200;
+      const maxKlineAgeMs = md.maxKlineAgeMs ?? 120_000;
+
+      // 4a. Snapshot 必须存在
+      const snapshot = md.snapshotStore.getSnapshot(signal.symbol);
+      if (!snapshot) {
+        return {
+          decision: 'skip',
+          symbol: signal.symbol,
+          reason: `[MD] no snapshot for ${signal.symbol} — wait for market data`,
+          elapsedMs: Date.now() - startTime,
+          biasReport,
+        };
+      }
+
+      // 4b. Snapshot 整体陈旧
+      if (snapshot.isStale) {
+        return {
+          decision: 'defense',
+          symbol: signal.symbol,
+          reason: `[MD] snapshot stale (${snapshot.ageMs}ms) for ${signal.symbol}`,
+          elapsedMs: Date.now() - startTime,
+          biasReport,
+        };
+      }
+
+      // 4c. 目标周期 K 线缺失
+      const targetKline = snapshot.klines[interval];
+      if (!targetKline) {
+        return {
+          decision: 'skip',
+          symbol: signal.symbol,
+          reason: `[MD] snapshot missing ${interval} kline for ${signal.symbol}`,
+          elapsedMs: Date.now() - startTime,
+          biasReport,
+        };
+      }
+
+      // 4d. 目标周期 K 线自身陈旧
+      const klineAgeMs = snapshot.generatedAt - targetKline.receivedAt;
+      if (klineAgeMs > maxKlineAgeMs) {
+        return {
+          decision: 'defense',
+          symbol: signal.symbol,
+          reason: `[MD] ${interval} kline stale (${klineAgeMs}ms > ${maxKlineAgeMs}ms) for ${signal.symbol}`,
+          elapsedMs: Date.now() - startTime,
+          biasReport,
+        };
+      }
+
+      // 4e. CandleSeries warm-up 不足
+      if (!md.candleStore.hasMinimumSeries(signal.symbol, interval, minimumSeries)) {
+        const available = md.candleStore.getSeries(signal.symbol, interval, seriesLimit).length;
+        return {
+          decision: 'skip',
+          symbol: signal.symbol,
+          reason: `[MD] insufficient candle history for ${signal.symbol} ${interval}: ${available}/${minimumSeries}`,
+          elapsedMs: Date.now() - startTime,
+          biasReport,
+        };
+      }
+
+      // 4f. 读取旧→新序列
+      const pulled = md.candleStore.getSeries(signal.symbol, interval, seriesLimit);
+      series = pulled;
+
+      // 4g. Snapshot 与 CandleSeries 不同步（最后一根 ts 必须一致）
+      const lastTs = pulled[pulled.length - 1]?.ts;
+      if (typeof lastTs !== 'number' || lastTs !== targetKline.kline.ts) {
+        return {
+          decision: 'skip',
+          symbol: signal.symbol,
+          reason: `[MD] snapshot/candle desync for ${signal.symbol} ${interval}: snapshotTs=${targetKline.kline.ts} candleTs=${lastTs ?? 'none'}`,
+          elapsedMs: Date.now() - startTime,
+          biasReport,
+        };
+      }
+
+      // 4h. 调用指标服务（带 OHLCV 序列）
+      const indicatorResults = await this.config.indicatorService.calculateAll({
+        asset: signal.symbol,
+        series,
+      });
+
+      return this.decide(signal, biasReport, indicatorResults, startTime);
+    }
+
+    // Step 4 (legacy / 无 marketData): 不传 series
     const indicatorResults = await this.config.indicatorService.calculateAll({
       asset: signal.symbol,
     });
 
+    return this.decide(signal, biasReport, indicatorResults, startTime);
+  }
+
+  /**
+   * Decision Engine 封装 —— 纯函数调用，语义不变。
+   */
+  private decide(
+    signal: { source: string; symbol: string; signalData?: Record<string, unknown> },
+    biasReport: MarketBiasReportFull,
+    indicatorResults: import('../types/indicators').IndicatorResult[],
+    startTime: number,
+  ): FastPipelineResult {
     const bias = biasReport.assets.find(a => a.symbol === signal.symbol);
 
     // Step 5: Decision Engine (replaceable rules — pure function, no hidden state)
