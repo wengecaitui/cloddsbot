@@ -14,6 +14,9 @@ import { EventEmitter } from 'events';
 import { ExecutionRouter } from '../router/ExecutionRouter';
 import { MarketBiasReportFull } from '../types/market-bias';
 import { PythonBridgeDaemon } from '../router/PythonBridgeDaemon';
+import type { TradingEventBus } from '../events';
+import { createTradingEventBus } from '../events';
+import type { Clock } from '../data/MarketSnapshot';
 
 export interface SlowPipelineConfig {
   router: ExecutionRouter;
@@ -23,6 +26,12 @@ export interface SlowPipelineConfig {
   adapterScript?: string;
   /** 执行超时（毫秒，默认 120s） */
   timeoutMs?: number;
+  /** Stage 3A6: 事件总线（可选注入，默认创建隔离 bus） */
+  bus?: TradingEventBus;
+  /** Stage 3A6: 时钟（可选注入，默认 Date.now） */
+  clock?: Clock;
+  /** Stage 3A6: 适配器工厂（测试用，默认创建 PythonBridgeDaemon） */
+  adapterFactory?: () => PythonBridgeDaemon;
 }
 
 export class SlowPipeline extends EventEmitter {
@@ -30,6 +39,8 @@ export class SlowPipeline extends EventEmitter {
   private running: boolean = false;
   private bridge: PythonBridgeDaemon | null = null;
   private bridgeInitPromise: Promise<void> | null = null;
+  public readonly bus: TradingEventBus;
+  private clock: Clock;
 
   constructor(config: SlowPipelineConfig) {
     super();
@@ -39,6 +50,8 @@ export class SlowPipeline extends EventEmitter {
       timeoutMs: config.timeoutMs ?? 600_000,
       ...config,
     };
+    this.bus = config.bus ?? createTradingEventBus();
+    this.clock = config.clock ?? { now: () => Date.now() };
   }
 
   /**
@@ -49,7 +62,9 @@ export class SlowPipeline extends EventEmitter {
 
     if (!this.bridgeInitPromise) {
       this.bridgeInitPromise = (async () => {
-        const bridge = new PythonBridgeDaemon(this.config.adapterScript!);
+        const bridge = this.config.adapterFactory
+          ? this.config.adapterFactory()
+          : new PythonBridgeDaemon(this.config.adapterScript!);
         await bridge.init();
         this.bridge = bridge;
       })();
@@ -89,8 +104,7 @@ export class SlowPipeline extends EventEmitter {
       if (!raw || !raw.success) {
         const errorMsg = raw?.error ?? '未知适配器错误';
         const fallbackReport = this.buildFallbackReport(symbol, errorMsg, elapsedMs);
-        this.config.router.updateBiasReport(fallbackReport).catch(() => {});
-        this.emit('run_complete', { report: fallbackReport, durationMs: elapsedMs });
+        await this.publishReport(fallbackReport, elapsedMs);
         return fallbackReport;
       }
 
@@ -104,14 +118,52 @@ export class SlowPipeline extends EventEmitter {
         },
       };
 
-      // ── 5. 更新路由 ────────────────────────────────────────────────
-      this.config.router.updateBiasReport(report).catch(() => {});
-      this.emit('run_complete', { report, durationMs: elapsedMs });
+      // ── 5. 统一完成路径：持久化 + 发布事件 ────────────────────────────
+      await this.publishReport(report, elapsedMs);
 
       return report;
+    } catch (error: unknown) {
+      const elapsedMs = Date.now() - startTime;
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const fallbackReport = this.buildFallbackReport(symbol, errorMsg, elapsedMs);
+
+      // Fallback 报告也走统一完成路径
+      await this.publishReport(fallbackReport, elapsedMs);
+
+      return fallbackReport;
     } finally {
       this.running = false;
     }
+  }
+
+  /**
+   * Stage 3A6: 统一报告完成路径
+   * - router.updateBiasReport（持久化，非阻塞）
+   * - bus.publish('research.bias.updated')
+   * - emit('run_complete')
+   */
+  private async publishReport(report: MarketBiasReportFull, elapsedMs: number): Promise<void> {
+    // 1. Router 持久化（保持现有非阻塞语义）
+    try {
+      await this.config.router.updateBiasReport(report);
+    } catch (err) {
+      this.emit('persistence_warning', { error: err });
+    }
+
+    // 2. 发布事件
+    try {
+      const receivedAt = this.clock.now();
+      const result = this.bus.publish('research.bias.updated', { report, receivedAt });
+      if (result.failures > 0) {
+        this.emit('publish_warning', { failures: result.failures, delivered: result.delivered });
+      }
+    } catch (err) {
+      // publish 自身抛错也不得使已生成报告失败
+      this.emit('publish_warning', { error: err });
+    }
+
+    // 3. 保持原有完成事件
+    this.emit('run_complete', { report, durationMs: elapsedMs });
   }
 
   /**
