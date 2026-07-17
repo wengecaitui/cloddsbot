@@ -59,7 +59,7 @@ function validatePlan(plan: SubscriptionPlan): void {
   }
 
   const seenCanonical = new Set<string>();
-  const seenExchange = new Set<string>();
+  const seenExchangeLower = new Set<string>(); // case-insensitive
 
   for (const e of plan.entries) {
     if (typeof e.symbol !== 'string' || e.symbol.length === 0) {
@@ -74,11 +74,13 @@ function validatePlan(plan: SubscriptionPlan): void {
     if (seenCanonical.has(e.symbol)) {
       throw new Error(`BinanceSubscriptionPlanner: duplicate canonical symbol "${e.symbol}"`);
     }
-    if (seenExchange.has(e.exchangeSymbol)) {
-      throw new Error(`BinanceSubscriptionPlanner: duplicate exchange symbol "${e.exchangeSymbol}"`);
+    // Case-insensitive duplicate exchange detection
+    const lowerEx = e.exchangeSymbol.toLowerCase();
+    if (seenExchangeLower.has(lowerEx)) {
+      throw new Error(`BinanceSubscriptionPlanner: duplicate exchange symbol "${e.exchangeSymbol}" (case-insensitive)`);
     }
     seenCanonical.add(e.symbol);
-    seenExchange.add(e.exchangeSymbol);
+    seenExchangeLower.add(lowerEx);
 
     // Validate intervals early
     sortIntervals(e.intervals);
@@ -89,15 +91,22 @@ function validatePlan(plan: SubscriptionPlan): void {
  * Build Binance USD-M Futures subscription requests.
  *
  * Stream naming (all lowercase):
- *   ticker   → <exchangeSymbol>@ticker
+ *   ticker     → <exchangeSymbol>@ticker
  *   bookTicker → <exchangeSymbol>@bookTicker
- *   kline    → <exchangeSymbol>@kline_<interval>
+ *   kline      → <exchangeSymbol>@kline_<interval>
+ *
+ * Planner uses lowercase for stream names (official Binance convention).
+ * exchangeSymbol is write-captured from plan (uppercase input preserved
+ * for the parser, but stream names are always lowercase).
  */
 export function planBinanceSubscriptionRequests(
   plan: SubscriptionPlan,
   op: 'SUBSCRIBE' | 'UNSUBSCRIBE' = 'SUBSCRIBE',
   options?: BinanceSubscriptionPlannerOptions,
 ): readonly BinanceSubscriptionRequest[] {
+  if (op !== 'SUBSCRIBE' && op !== 'UNSUBSCRIBE') {
+    throw new Error(`BinanceSubscriptionPlanner: op must be SUBSCRIBE or UNSUBSCRIBE, got "${op}"`);
+  }
   validatePlan(plan);
 
   const maxStreams = options?.maxStreamsPerRequest ?? 50;
@@ -106,8 +115,8 @@ export function planBinanceSubscriptionRequests(
   if (!Number.isInteger(maxStreams) || maxStreams < 1) {
     throw new Error('BinanceSubscriptionPlanner: maxStreamsPerRequest must be a positive integer');
   }
-  if (!Number.isInteger(startId) || startId < 1) {
-    throw new Error('BinanceSubscriptionPlanner: startId must be a positive integer');
+  if (!Number.isInteger(startId) || startId < 1 || !Number.isSafeInteger(startId)) {
+    throw new Error('BinanceSubscriptionPlanner: startId must be a positive safe integer');
   }
 
   // ── Build all stream names ──────────────────────────────────────────────
@@ -131,16 +140,16 @@ export function planBinanceSubscriptionRequests(
   }
 
   // ── Defensive copy of streams ──────────────────────────────────────────
-  // No external reference retained.
   const allStreams = [...streams];
 
   // ── Batch ───────────────────────────────────────────────────────────────
   const requests: BinanceSubscriptionRequest[] = [];
   let currentId = startId;
+  const maxSafe = Number.MAX_SAFE_INTEGER;
 
   for (let i = 0; i < allStreams.length; i += maxStreams) {
-    if (currentId > Number.MAX_SAFE_INTEGER) {
-      throw new Error('BinanceSubscriptionPlanner: id overflow');
+    if (!Number.isSafeInteger(currentId)) {
+      throw new Error('BinanceSubscriptionPlanner: id overflow (not safe integer)');
     }
     const chunk = allStreams.slice(i, i + maxStreams);
     requests.push({
@@ -149,6 +158,9 @@ export function planBinanceSubscriptionRequests(
       id: currentId,
     });
     currentId++;
+    if (currentId > maxSafe) {
+      throw new Error('BinanceSubscriptionPlanner: id overflow');
+    }
   }
 
   return requests;
