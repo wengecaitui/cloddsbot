@@ -238,3 +238,34 @@ test('20. ack id zero returns malformed (id must be non-negative integer)', () =
   const f = parseBinancePublicMessage(JSON.stringify({ result: null, id: -1 }));
   assert.equal(f.kind, 'malformed', 'negative ack id → malformed');
 });
+
+// ── 21. bookTicker without E/T → ts undefined (R1) ───────────────────────
+
+test('21. bookTicker without E or T produces ts === undefined', () => {
+  const raw = JSON.stringify({
+    e: 'bookTicker', s: 'BTCUSDT',
+    b: '50000.10', B: '1.5', a: '50000.20', A: '2.0',
+    // no E, no T
+  });
+  const f = parseBinancePublicMessage(raw);
+  if (f.kind !== 'data') { assert.fail('expected data'); return; }
+  const ev = f.events[0];
+  if (ev.kind !== 'bookTicker') { assert.fail('expected bookTicker'); return; }
+  assert.equal(ev.bestBid, 50000.10);
+  assert.equal(ev.bestAsk, 50000.20);
+  assert.equal(ev.ts, undefined, 'ts must be undefined when E/T absent');
+});
+
+// ── 22. bookTicker with E present still strict ───────────────────────────
+
+test('22. bookTicker with E present preserves ts', () => {
+  const raw = JSON.stringify({
+    s: 'BTCUSDT',
+    b: '50000.10', a: '50000.20', E: 1700000000000,
+  });
+  const f = parseBinancePublicMessage(raw);
+  if (f.kind !== 'data') { assert.fail('expected data'); return; }
+  const ev = f.events[0];
+  if (ev.kind !== 'bookTicker') { assert.fail('expected bookTicker'); return; }
+  assert.equal(ev.ts, 1700000000000);
+});

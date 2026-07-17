@@ -537,3 +537,201 @@ test('21. connection rotation timer fires', async () => {
   assert.ok(errors.some(e => e.phase === 'rotation'), 'rotation error fired');
   c.stop();
 });
+
+// ── Stage 3B3C-R1: startup hardening ─────────────────────────────────────
+
+test('R1. outbound JSON has exactly method/params/id — no route', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BinanceV2PublicCollector({ plan: makePlan(), webSocketFactory: (url: string) => f.create(url), scheduler: s as any });
+  const p = c.start();
+  // microtask 1: factory creates sockets; onopen fires via queueMicrotask
+  // microtask 2: onopen runs, sends subscribes
+  // Immediately check sent messages after microtasks drain
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  for (let i = 0; i < f.createdSockets.length; i++) {
+    const ws = getWsByIdx(f, i);
+    for (const msg of ws.sentMessages) {
+      const parsed = JSON.parse(msg);
+      const keys = Object.keys(parsed).sort();
+      assert.deepEqual(keys, ['id', 'method', 'params'], `msg=${msg} has exactly method/params/id`);
+    }
+  }
+  c.stop();
+  try { await p; } catch { /* expected — stop before acks resolve */ }
+});
+
+test('R2. market ack before public socket open does not get lost', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BinanceV2PublicCollector({ plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url), scheduler: s as any, ackTimeoutMs: 5000 });
+  // Start so sockets are created (autoOpen will fire onopen on both)
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r)); // drain autoOpen microtasks
+  // Stop and discard c, then redo with manual-control factory
+  c.stop();
+  await p.catch(() => {});
+  await new Promise(r => queueMicrotask(r));
+
+  // Manual-control factory to control onopen/ack order
+  class ManualFactory implements BinanceWebSocketFactory {
+    created: FakeWS[] = [];
+    create(url: string): BinanceWSLike {
+      const ws: FakeWS = {
+        url, readyState: 0,
+        onopen: null, onmessage: null, onclose: null, onerror: null,
+        sentMessages: [], isOpen: false, isClosed: false, autoOpen: false,
+        send(data: string) { this.sentMessages.push(data); },
+        close() { this.isClosed = true; this.isOpen = false; this.readyState = 3; },
+      };
+      this.created.push(ws);
+      return ws;
+    }
+  }
+  const mf = new ManualFactory();
+  const c2 = new BinanceV2PublicCollector({ plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => mf.create(url), scheduler: s as any, ackTimeoutMs: 5000 });
+  const p2 = c2.start();
+  await new Promise(r => queueMicrotask(r));
+  // 2 sockets created, neither open
+  assert.equal(mf.created.length, 2);
+  // Open market (index 0) first
+  const marketWs = mf.created[0];
+  const publicWs = mf.created[1];
+  marketWs.onopen?.({});
+  // Ack market (id=1) before public opens
+  marketWs.onmessage!({ data: ackMsg(1) });
+  // Now open public
+  publicWs.onopen?.({});
+  publicWs.onmessage!({ data: ackMsg(2) });
+  await p2;
+  assert.equal(c2.state, 'running', 'early market ack preserved');
+});
+
+test('R3. reconnect path also accepts early acks', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any, reconnectDelayMs: 100, ackTimeoutMs: 5000,
+  });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+
+  // Trigger reconnect
+  getWsByIdx(f, 0).onclose?.({});
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  // New sockets created — open them one at a time, ack early
+  const newMarket = f.createdSockets[2];
+  const newPublic = f.createdSockets[3];
+  newMarket.onopen?.({});
+  newMarket.onmessage!({ data: ackMsg(1) });
+  newPublic.onopen?.({});
+  newPublic.onmessage!({ data: ackMsg(2) });
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(c.state, 'running', 'reconnect completed with early ack');
+  c.stop();
+});
+
+test('R4. unknown/duplicate ack does not affect state', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const c = new BinanceV2PublicCollector({ plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url), scheduler: s as any, ackTimeoutMs: 5000 });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  // Unknown ack (id=999) ignored
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(999) });
+  // State remains subscribing
+  assert.equal(c.state, 'subscribing');
+  // Duplicate id=1 ack has no extra effect
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  // Still subscribing because id=2 not yet acked
+  assert.equal(c.state, 'subscribing');
+  // Now ack id=2
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+  assert.equal(c.state, 'running');
+});
+
+test('R5. watchdog error fires exactly once', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const errors: BinanceCollectorFailure[] = [];
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any, inactivityPeriodMs: 100, reconnectDelayMs: 200, ackTimeoutMs: 5000,
+  });
+  c.onError(e => errors.push(e));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+  assert.equal(errors.length, 0, 'no errors before watchdog');
+  s.tick(100);
+  assert.equal(errors.length, 1, 'exactly one error from watchdog');
+  assert.equal(errors[0].phase, 'watchdog');
+  c.stop();
+});
+
+test('R6. rotation error fires exactly once', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const errors: BinanceCollectorFailure[] = [];
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any, lifetimeMs: 200, reconnectDelayMs: 200, ackTimeoutMs: 5000,
+  });
+  c.onError(e => errors.push(e));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+
+  s.tick(200);
+  assert.equal(errors.length, 1, 'exactly one error from rotation');
+  assert.equal(errors[0].phase, 'rotation');
+  c.stop();
+});
+
+test('R7. bookTicker without ts arrives in collector without fabricating ts', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const tickers: WsTicker[] = [];
+  const c = new BinanceV2PublicCollector({ plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url), scheduler: s as any, ackTimeoutMs: 5000 });
+  c.onTicker(t => tickers.push(t));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+
+  // Send bookTicker without E/T
+  getWsByIdx(f, 1).onmessage!({ data: JSON.stringify({ s: 'BTCUSDT', b: '50000.10', B: '1', a: '50000.20', A: '1' }) });
+  // Send ticker
+  getWsByIdx(f, 0).onmessage!({ data: JSON.stringify(tickerFrame('BTCUSDT')) });
+  assert.equal(tickers.length, 1, 'merged');
+  // The merged WsTicker uses ticker.ts (1700000000000), NOT fabricated from bookTicker
+  assert.equal(tickers[0].ts, 1700000000000, 'ts comes from ticker, not fabricated');
+  assert.equal(tickers[0].bestBid, 50000.10);
+  assert.equal(tickers[0].bestAsk, 50000.20);
+});
+

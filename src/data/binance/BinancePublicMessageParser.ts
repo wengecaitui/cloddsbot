@@ -52,8 +52,12 @@ export interface BinanceBookTickerUpdate {
   readonly exchangeSymbol: string;
   readonly bestBid: number;
   readonly bestAsk: number;
-  /** Event timestamp from Binance payload, or 0 if absent. */
-  readonly ts: number;
+  /**
+   * Event timestamp from Binance payload, or undefined when the frame
+   * carries no E/T field. The Collector MUST NOT fabricate a timestamp;
+   * it forwards `undefined` to downstream consumers.
+   */
+  readonly ts?: number;
 }
 
 export interface BinanceKlineUpdate {
@@ -319,9 +323,8 @@ function tryParseBookTicker(raw: unknown, envelopeSymbol: string | undefined): P
   if (bestBid === null || bestAsk === null) {
     return { ok: false, malformed: { kind: 'malformed', reason: 'bookTicker: invalid b/a fields' } };
   }
-  // ts is optional — some bookTicker frames carry no E/T. Use 0 as sentinel
-  // so the Collector can inject its own receive time later.
-  const bookTickerTs = ts ?? 0;
+  // ts is optional — some bookTicker frames carry no E/T. Forward undefined
+  // so the Collector does not fabricate an exchange timestamp.
 
   return {
     ok: true,
@@ -330,7 +333,7 @@ function tryParseBookTicker(raw: unknown, envelopeSymbol: string | undefined): P
       exchangeSymbol: payloadSymbRaw,
       bestBid,
       bestAsk,
-      ts: bookTickerTs,
+      ...(ts === null ? {} : { ts }),
     },
   };
 }
