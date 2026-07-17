@@ -883,3 +883,254 @@ test('32. heartbeat failure routes through onBitgetCollectorError once', async (
   const hbErrors = errors.filter(e => e.phase === 'heartbeat');
   assert.equal(hbErrors.length, 1, 'single heartbeat error');
 });
+
+
+// ── Stage 3B2C-R1: Runtime option snapshot + reconnect state ──────────
+
+test('R1. bitget.endpoint mutation after construct ignored', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const bitget: Record<string, any> = {
+    endpoint: 'wss://orig.example',
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  bitget.endpoint = 'wss://evil.example';
+  rt.start();
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(f.createdSockets[0].url, 'wss://orig.example', 'original endpoint used');
+  rt.stop();
+});
+
+test('R2. bitget.webSocketFactory swap ignored', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const bitget: Record<string, any> = {
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  bitget.webSocketFactory = ((_url: string) => { throw new Error('should not call'); }) as any;
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(f.createdSockets.length, 1, 'original factory used');
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  rt.stop();
+});
+
+test('R3. timeout mutation after construct ignored', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const bitget: Record<string, any> = {
+    ackTimeoutMs: 5000,
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  bitget.ackTimeoutMs = 0;
+  bitget.heartbeatIntervalMs = 0;
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  rt.stop();
+});
+
+test('R4. plannerOptions snapshot preserved', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const plannerOpts = { maxArgsPerBatch: 2 };
+  const bitget: Record<string, any> = {
+    plannerOptions: plannerOpts,
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  plannerOpts.maxArgsPerBatch = 999;
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  assert.ok(f.createdSockets[0].sentMessages.length >= 1, 'batches sent');
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  rt.stop();
+});
+
+test('R5. scheduler method replacement ignored', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const bitget: Record<string, any> = {
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  s.setTimeout = ((_h: any, _d: any) => { throw new Error('snapshot should use bound original'); }) as any;
+  s.clearTimeout = ((_h: any) => {}) as any;
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  rt.stop();
+});
+
+test('R6. restart collector uses original snapshot', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const bitget: Record<string, any> = {
+    endpoint: 'wss://snap.example',
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  bitget.endpoint = 'wss://evil.example';
+  bitget.webSocketFactory = (() => { throw new Error('should not call'); }) as any;
+  rt.universe.setPlan({ entries: [{ symbol: 'BTC/USDT', intervals: ['1m'], ticker: true }, { symbol: 'ETH/USDT', intervals: ['1m'], ticker: true }] });
+  const applyP = rt.applyUniversePlan();
+  for (let _i = 0; _i < 4; _i++) await new Promise(r => queueMicrotask(r));
+  assert.equal(f.createdSockets.length, 2, 'new socket created with original factory');
+  const ws2 = f.createdSockets[1];
+  assert.equal(ws2.url, 'wss://snap.example', 'original endpoint used for restart');
+  ws2.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'BTCUSDT' }) });
+  ws2.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'BTCUSDT' }) });
+  ws2.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'ticker', instId: 'ETHUSDT' }) });
+  ws2.onmessage!({ data: ackMsg({ instType: 'USDT-FUTURES', channel: 'candle1m', instId: 'ETHUSDT' }) });
+  await applyP;
+  rt.stop();
+});
+
+test('R7. bitget plan injected via any overridden', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const bitget: Record<string, any> = {
+    plan: { version: 999, entries: [] },
+    webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any,
+  };
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any, bitget });
+  rt.start();
+  await new Promise(r => queueMicrotask(r));
+  const payload = f.createdSockets[0].sentMessages.join(' ');
+  assert.ok(payload.includes('BTCUSDT'), 'real plan payload used, not empty injected plan');
+  rt.stop();
+});
+
+test('R8. reconnect socket state connecting before open', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any, reconnectDelayMs: 100 } });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  f.autoOpen = false;
+  f.createdSockets[0].onclose?.({});
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(f.createdSockets.length, 2);
+  const ws2 = f.createdSockets[1];
+  ws2.isOpen = true; ws2.readyState = 1;
+  ws2.onopen?.({});
+  rt.stop();
+});
+
+test('R9. reconnect socket transitions to subscribing after open', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any, reconnectDelayMs: 100 } });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  f.createdSockets[0].onclose?.({});
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  assert.ok(f.createdSockets[1].sentMessages.length > 0, 'subscriptions sent after open');
+  rt.stop();
+});
+
+test('R10. reconnect socket reaches running after acks', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any, reconnectDelayMs: 100 } });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  f.createdSockets[0].onclose?.({});
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[1], BTC_ETH_ACKS);
+  await new Promise(r => queueMicrotask(r));
+  assert.equal(rt.isRunning, true, 'running after reconnect acks');
+  rt.stop();
+});
+
+test('R11. stale reconnect socket open ignored', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any, reconnectDelayMs: 100 } });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  const oldOnOpen = f.createdSockets[0].onopen;
+  f.createdSockets[0].onclose?.({});
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  const runningBeforeStale = rt.isRunning;
+  oldOnOpen!({});
+  assert.equal(rt.isRunning, runningBeforeStale, 'state unchanged after stale open');
+  rt.stop();
+});
+
+test('R12. reconnect ack timeout retries', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const errors: BitgetTradingRuntimeCollectorFailure[] = [];
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any, reconnectDelayMs: 50, ackTimeoutMs: 50 },
+    onBitgetCollectorError: (e) => errors.push(e) });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  ackAll(f.createdSockets[0], BTC_ETH_ACKS);
+  await p;
+  f.createdSockets[0].onclose?.({});
+  s.tick(50);
+  await new Promise(r => queueMicrotask(r));
+  s.tick(50);
+  assert.equal(errors.length, 1, 'one reconnect timeout error');
+  rt.stop();
+});
+
+test('R13. meta — 32 original still work', () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any } });
+  assert.ok(rt);
+});
+
+test('R14. collector error planVersion matches universe version', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const errors: BitgetTradingRuntimeCollectorFailure[] = [];
+  const rt = createBitgetTradingRuntime({ universe: makeUniverse(), indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: (url: string) => f.create(url), scheduler: s as any, ackTimeoutMs: 100 },
+    onBitgetCollectorError: (e) => errors.push(e) });
+  const p = rt.start();
+  await new Promise(r => queueMicrotask(r));
+  s.tick(100);
+  try { await p; } catch { /* expected */ }
+  assert.equal(errors.length, 1, 'exactly one error');
+  assert.equal(errors[0].planVersion, rt.universe.getPlan().version, 'planVersion matches');
+  rt.stop();
+});

@@ -561,50 +561,55 @@ export class BitgetV2PublicCollector {
     }
 
     this.ws = ws;
-    this._state = 'subscribing';
+    // State is already 'connecting' from the caller. Do NOT advance to
+    // 'subscribing' until the transport is actually open (onopen).
+    // expectedAckKeys is rebuilt inside onopen, not here.
 
-    this.expectedAckKeys = new Set<string>();
-    for (const req of this.capturedRequests) {
-      for (const a of req.args) {
-        this.expectedAckKeys.add(ackKey(a));
+    ws.onopen = () => {
+      if (this.generation !== gen || this.manualStop) return;
+      this._state = 'subscribing';
+
+      // Rebuild pending ack keys from saved requests
+      this.expectedAckKeys = new Set<string>();
+      for (const req of this.capturedRequests) {
+        for (const a of req.args) {
+          this.expectedAckKeys.add(ackKey(a));
+        }
       }
-    }
 
-    const setHandlersForReconnect = () => {
-      ws.onopen = () => {
-        if (this.generation !== gen || this.manualStop) return;
-        this._state = 'subscribing';
-        for (const req of this.capturedRequests) {
-          try { ws.send(JSON.stringify(req)); } catch (err: any) {
-            this.beginReconnect(this.generation, { phase: 'reconnect', error: err as Error });
-            return;
+      // Send all batches
+      for (const req of this.capturedRequests) {
+        try { ws.send(JSON.stringify(req)); } catch (err: any) {
+          this.beginReconnect(this.generation, { phase: 'reconnect', error: err as Error });
+          return;
+        }
+      }
+
+      // Start ack timeout if needed
+      if (this.expectedAckKeys.size > 0) {
+        this.ackTimerHandle = this.scheduler.setTimeout(() => {
+          if (this.generation === gen && !this.manualStop) {
+            this.beginReconnect(this.generation, { phase: 'reconnect', error: new Error('reconnect ack timeout') });
           }
-        }
-        if (this.expectedAckKeys.size > 0) {
-          this.ackTimerHandle = this.scheduler.setTimeout(() => {
-            if (this.generation === gen && !this.manualStop) {
-              this.beginReconnect(this.generation, { phase: 'reconnect', error: new Error('reconnect ack timeout') });
-            }
-          }, this.options.ackTimeoutMs);
-        } else {
-          this.enterRunning(gen);
-        }
-      };
-      ws.onmessage = (event: { data: unknown }) => {
-        if (this.generation !== gen || this.manualStop) return;
-        this.onMessage(event.data, gen);
-      };
-      ws.onclose = () => {
-        if (this.generation !== gen || this.manualStop) return;
-        this.beginReconnect(this.generation);
-      };
-      ws.onerror = () => {
-        if (this.generation !== gen || this.manualStop) return;
-        // Always reconnect on error (unified entry)
-        this.beginReconnect(this.generation);
-      };
+        }, this.options.ackTimeoutMs);
+      } else {
+        this.enterRunning(gen);
+      }
     };
 
-    setHandlersForReconnect();
+    ws.onmessage = (event: { data: unknown }) => {
+      if (this.generation !== gen || this.manualStop) return;
+      this.onMessage(event.data, gen);
+    };
+
+    ws.onclose = () => {
+      if (this.generation !== gen || this.manualStop) return;
+      this.beginReconnect(this.generation);
+    };
+
+    ws.onerror = () => {
+      if (this.generation !== gen || this.manualStop) return;
+      this.beginReconnect(this.generation);
+    };
   }
 }
