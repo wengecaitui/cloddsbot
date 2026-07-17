@@ -666,6 +666,7 @@ export class BinanceV2PublicCollector {
           try {
             this.klineHandler({
               channel: 'kline',
+              exchange: 'binance',
               instId: ev.exchangeSymbol,
               interval: ev.interval,
               open: ev.open,
@@ -696,6 +697,7 @@ export class BinanceV2PublicCollector {
 
     return {
       channel: 'ticker',
+      exchange: 'binance',
       instId: tc.exchangeSymbol,
       last: tc.last,
       bestBid: bc.bestBid,

@@ -1,5 +1,9 @@
 // src/data/types.ts
 // Phase 5: 统一数据层 — 行情服务数据结构
+// Stage 3B4C1: WsTicker / WsKline 携带强制 exchange provenance
+
+// ─── Exchange-aware market identity ──────────────────────────────────────
+import type { ExchangeId, ExchangeAwareMarketData } from './MarketIdentity';
 
 // ─── WebSocket 原始行情 ────────────────────────────────────────────────────
 
@@ -31,9 +35,8 @@ export interface WsTrade {
 }
 
 /** Bitget WS ticker 推送（1s 快照） */
-export interface WsTicker {
+export interface WsTicker extends ExchangeAwareMarketData {
   channel: "ticker";
-  instId: string;
   last: number;
   bestBid: number;
   bestAsk: number;
@@ -44,9 +47,8 @@ export interface WsTicker {
 }
 
 /** Bitget WS kline 推送 */
-export interface WsKline {
+export interface WsKline extends ExchangeAwareMarketData {
   channel: "kline";
-  instId: string;
   interval: string;
   open: number;
   high: number;

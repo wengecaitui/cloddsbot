@@ -10,8 +10,10 @@
 
 import type { MarketDataCollectorPort } from '../market/MarketDataRuntime';
 import type { SubscriptionPlan } from '../market/UniverseManager';
+import type { ExchangeId } from '../../data/MarketIdentity';
 
-export type ExchangeId = 'bitget' | 'binance';
+// Re-export for backward compat — consumers should import from MarketIdentity directly.
+export type { ExchangeId };
 
 /**
  * Exchange Market Data Provider.

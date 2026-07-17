@@ -86,11 +86,11 @@ function makeRuntime(opts: {
 }
 
 function ticker(exchangeSymbol: string, last = 100): WsTicker {
-  return { channel: 'ticker', instId: exchangeSymbol, last, bestBid: last - 0.5, bestAsk: last + 0.5, volume24h: 1000, ts: 1000, instType: 'sp' } as any;
+  return { channel: 'ticker', exchange: 'bitget', instId: exchangeSymbol, last, bestBid: last - 0.5, bestAsk: last + 0.5, volume24h: 1000, ts: 1000 } as any;
 }
 
 function kline(exchangeSymbol: string, interval: string, ts = 2000, confirm = true): WsKline {
-  return { channel: 'kline', instId: exchangeSymbol, interval, open: 100, high: 110, low: 90, close: 105, volume: 50, ts, confirm, instType: 'sp' } as any;
+  return { channel: 'kline', exchange: 'bitget', instId: exchangeSymbol, interval, open: 100, high: 110, low: 90, close: 105, volume: 50, ts, confirm } as any;
 }
 
 // ── PlanAwareCollector tests (1-12) ────────────────────────────────────────
@@ -534,11 +534,11 @@ test('27. restart fail does not clear stores', async () => {
   await rt.start();
   // Inject data directly into stores
   rt.marketData.store.updateTicker({
-    ticker: { channel: 'ticker', instId: 'BTC/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, instType: 'sp' } as any,
+    ticker: { channel: 'ticker', instId: 'BTC/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, exchange: 'bitget' } as any,
     receivedAt: 100,
   });
   rt.marketData.candleStore.appendClosedKline({
-    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, instType: 'sp' } as any,
+    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
     receivedAt: 200,
   });
   assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'));
@@ -623,7 +623,7 @@ test('30. deleted symbol cleans snapshot + candle data', async () => {
   // Inject data for both symbols
   for (const sym of ['BTC/USDT', 'ETH/USDT']) {
     rt.marketData.store.updateTicker({
-      ticker: { channel: 'ticker', instId: sym, last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, instType: 'sp' } as any,
+      ticker: { channel: 'ticker', instId: sym, last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, exchange: 'bitget' } as any,
       receivedAt: 100,
     });
     rt.marketData.candleStore.appendClosedKline({
@@ -652,7 +652,7 @@ test('31. interval change cleans whole symbol data', async () => {
   });
   await rt.start();
   rt.marketData.candleStore.appendClosedKline({
-    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, instType: 'sp' } as any,
+    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
     receivedAt: 200,
   });
   assert.equal(rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 10).length, 1);
@@ -673,7 +673,7 @@ test('32. ticker flag change cleans whole symbol data', async () => {
   });
   await rt.start();
   rt.marketData.store.updateTicker({
-    ticker: { channel: 'ticker', instId: 'BTC/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, instType: 'sp' } as any,
+    ticker: { channel: 'ticker', instId: 'BTC/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, exchange: 'bitget' } as any,
     receivedAt: 100,
   });
   assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'));
@@ -694,7 +694,7 @@ test('33. new symbol added does not clean old data', async () => {
   });
   await rt.start();
   rt.marketData.candleStore.appendClosedKline({
-    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, instType: 'sp' } as any,
+    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
     receivedAt: 200,
   });
   universe.addSymbol('ETH/USDT');
@@ -713,7 +713,7 @@ test('34. semantically identical entry does not clean data', async () => {
   });
   await rt.start();
   rt.marketData.candleStore.appendClosedKline({
-    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, instType: 'sp' } as any,
+    kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
     receivedAt: 200,
   });
   // Apply same plan (no change) — should not clean

@@ -151,7 +151,7 @@ export class BitgetV2PublicCollector {
       }
     }
 
-    this.closeDetector = createCandleCloseDetector();
+    this.closeDetector = createCandleCloseDetector('bitget');
     this.wsFactory = options.webSocketFactory ?? defaultWebSocketFactory;
     this.scheduler = options.scheduler ?? defaultScheduler;
 
@@ -480,6 +480,7 @@ export class BitgetV2PublicCollector {
       if (u.kind === 'ticker') {
         tickers.push({
           channel: 'ticker',
+          exchange: 'bitget',
           instId: u.exchangeSymbol,
           last: u.last,
           bestBid: u.bestBid,

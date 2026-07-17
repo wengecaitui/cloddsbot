@@ -59,10 +59,12 @@ export function createPlanAwareCollector(
     onTicker(handler: (ticker: WsTicker) => void): void {
       inner.onTicker((ticker) => {
         if (!ticker || typeof ticker.instId !== 'string') return;
+        if (typeof ticker.exchange !== 'string') return; // Stage 3B4C1: provenance required
         const entry = snap.byExchange.get(ticker.instId);
         if (!entry) return;
         if (entry.ticker === false) return;
 
+        // Stage 3B4C1: preserve exchange provenance from source Collector.
         const clone: WsTicker = { ...ticker, instId: entry.symbol };
         handler(clone);
       });
@@ -71,10 +73,12 @@ export function createPlanAwareCollector(
     onKline(handler: (kline: WsKline) => void): void {
       inner.onKline((kline) => {
         if (!kline || typeof kline.instId !== 'string') return;
+        if (typeof kline.exchange !== 'string') return; // Stage 3B4C1: provenance required
         const entry = snap.byExchange.get(kline.instId);
         if (!entry) return;
         if (!entry.intervals.includes(kline.interval)) return;
 
+        // Stage 3B4C1: preserve exchange provenance from source Collector.
         const clone: WsKline = { ...kline, instId: entry.symbol };
         handler(clone);
       });
