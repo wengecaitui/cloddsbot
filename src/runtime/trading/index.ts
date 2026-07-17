@@ -34,3 +34,11 @@ export {
   createBinanceMarketDataProvider,
   type BinanceMarketDataProviderOptions,
 } from './BinanceMarketDataProvider';
+
+// Stage 3B4B: Unified single-exchange Runtime selector
+export type {
+  ExchangeTradingRuntimeOptions,
+} from './ExchangeTradingRuntime';
+export {
+  createExchangeTradingRuntime,
+} from './ExchangeTradingRuntime';
