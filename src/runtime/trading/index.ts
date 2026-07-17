@@ -11,3 +11,12 @@ export type {
 export {
   createBitgetTradingRuntime,
 } from './BitgetTradingRuntime';
+
+// Stage 3B3D: Binance USD-M wiring
+export type {
+  BinanceTradingRuntimeOptions,
+  BinanceTradingRuntimeCollectorFailure,
+} from './BinanceTradingRuntime';
+export {
+  createBinanceTradingRuntime,
+} from './BinanceTradingRuntime';
