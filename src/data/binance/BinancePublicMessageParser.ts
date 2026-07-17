@@ -52,6 +52,7 @@ export interface BinanceBookTickerUpdate {
   readonly exchangeSymbol: string;
   readonly bestBid: number;
   readonly bestAsk: number;
+  /** Event timestamp from Binance payload, or 0 if absent. */
   readonly ts: number;
 }
 
@@ -315,9 +316,12 @@ function tryParseBookTicker(raw: unknown, envelopeSymbol: string | undefined): P
   const bestBid = parseFinite(obj.b);
   const bestAsk = parseFinite(obj.a);
 
-  if (bestBid === null || bestAsk === null || ts === null) {
-    return { ok: false, malformed: { kind: 'malformed', reason: 'bookTicker: invalid b/a/ts fields' } };
+  if (bestBid === null || bestAsk === null) {
+    return { ok: false, malformed: { kind: 'malformed', reason: 'bookTicker: invalid b/a fields' } };
   }
+  // ts is optional — some bookTicker frames carry no E/T. Use 0 as sentinel
+  // so the Collector can inject its own receive time later.
+  const bookTickerTs = ts ?? 0;
 
   return {
     ok: true,
@@ -326,7 +330,7 @@ function tryParseBookTicker(raw: unknown, envelopeSymbol: string | undefined): P
       exchangeSymbol: payloadSymbRaw,
       bestBid,
       bestAsk,
-      ts,
+      ts: bookTickerTs,
     },
   };
 }
