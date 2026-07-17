@@ -1,13 +1,24 @@
-// Stage 3B3B: Binance USD-M Subscription Planner
+// Stage 3B3B-R2: Binance USD-M Subscription Planner with route partitioning
 //
 // Pure function — no network, no API keys, no side effects.
 // Converts a SubscriptionPlan into Binance USD-M Futures SUBSCRIBE / UNSUBSCRIBE
-// requests with deterministic ordering and payload batching.
+// requests with deterministic ordering, route-aware batching, and global
+// sequential request identifiers.
+//
+// Routes (see Binance USD-M WebSocket endpoints):
+//   public  – bookTicker streams (via wss://fstream.binance.com:443/ws)
+//   market  – ticker + kline streams (via wss://fstream.binance.com:443/ws)
+// Each request contains only a single route. Mixed-route requests are never
+// produced. Requests are ordered: market first, then public.
+// Request IDs are globally unique and sequential across all routes.
 
 import type { SubscriptionPlan } from '../../runtime/market/UniverseManager';
 
+export type BinanceRoute = 'public' | 'market';
+
 /** One Binance WebSocket subscription request. */
 export interface BinanceSubscriptionRequest {
+  readonly route: BinanceRoute;
   readonly method: 'SUBSCRIBE' | 'UNSUBSCRIBE';
   readonly params: readonly string[];
   readonly id: number;
@@ -42,7 +53,7 @@ function sortIntervals(intervals: readonly string[]): string[] {
     if (!SUPPORTED_INTERVALS.has(iv)) {
       throw new Error(
         `BinanceSubscriptionPlanner: unsupported interval "${iv}". ` +
-        `Supported: ${[...SUPPORTED_INTERVALS].join(', ')}`
+        `Supported: ${[...SUPPORTED_INTERVALS].join(', ')}`,
       );
     }
   }
@@ -59,14 +70,14 @@ function validatePlan(plan: SubscriptionPlan): void {
   }
 
   const seenCanonical = new Set<string>();
-  const seenExchangeLower = new Set<string>(); // case-insensitive
+  const seenExchangeLower = new Set<string>();
 
   for (const e of plan.entries) {
     if (typeof e.symbol !== 'string' || e.symbol.length === 0) {
       throw new Error('BinanceSubscriptionPlanner: entry.symbol must be non-empty string');
     }
     if (typeof e.exchangeSymbol !== 'string' || e.exchangeSymbol.length === 0 || /\s/.test(e.exchangeSymbol)) {
-      throw new Error(`BinanceSubscriptionPlanner: entry.exchangeSymbol must be non-empty with no whitespace`);
+      throw new Error('BinanceSubscriptionPlanner: entry.exchangeSymbol must be non-empty with no whitespace');
     }
     if (!Array.isArray(e.intervals) || e.intervals.length === 0) {
       throw new Error(`BinanceSubscriptionPlanner: entry.intervals must be non-empty array for "${e.symbol}"`);
@@ -74,7 +85,6 @@ function validatePlan(plan: SubscriptionPlan): void {
     if (seenCanonical.has(e.symbol)) {
       throw new Error(`BinanceSubscriptionPlanner: duplicate canonical symbol "${e.symbol}"`);
     }
-    // Case-insensitive duplicate exchange detection
     const lowerEx = e.exchangeSymbol.toLowerCase();
     if (seenExchangeLower.has(lowerEx)) {
       throw new Error(`BinanceSubscriptionPlanner: duplicate exchange symbol "${e.exchangeSymbol}" (case-insensitive)`);
@@ -82,22 +92,31 @@ function validatePlan(plan: SubscriptionPlan): void {
     seenCanonical.add(e.symbol);
     seenExchangeLower.add(lowerEx);
 
-    // Validate intervals early
     sortIntervals(e.intervals);
   }
+}
+
+// ── Stream → route mapping ────────────────────────────────────────────────
+
+function classifyStream(stream: string): BinanceRoute {
+  if (stream.endsWith('@bookTicker')) return 'public';
+  return 'market'; // @ticker, @kline_*
 }
 
 /**
  * Build Binance USD-M Futures subscription requests.
  *
  * Stream naming (all lowercase):
- *   ticker     → <exchangeSymbol>@ticker
- *   bookTicker → <exchangeSymbol>@bookTicker
- *   kline      → <exchangeSymbol>@kline_<interval>
+ *   ticker     → <exchangeSymbol>@ticker      (route: market)
+ *   bookTicker → <exchangeSymbol>@bookTicker  (route: public)
+ *   kline      → <exchangeSymbol>@kline_<iv>  (route: market)
  *
- * Planner uses lowercase for stream names (official Binance convention).
- * exchangeSymbol is write-captured from plan (uppercase input preserved
- * for the parser, but stream names are always lowercase).
+ * Routing rules:
+ *   - bookTicker → public endpoint
+ *   - ticker + kline → market endpoint
+ *   - A single request never mixes routes
+ *   - Requests are ordered: market first, then public
+ *   - Request ids are globally unique and sequential
  */
 export function planBinanceSubscriptionRequests(
   plan: SubscriptionPlan,
@@ -119,10 +138,10 @@ export function planBinanceSubscriptionRequests(
     throw new Error('BinanceSubscriptionPlanner: startId must be a positive safe integer');
   }
 
-  // ── Build all stream names ──────────────────────────────────────────────
-  const streams: string[] = [];
+  // ── Build all stream names tagged by route ──────────────────────────
+  const marketStreams: string[] = [];
+  const publicStreams: string[] = [];
 
-  // Sort entries by exchangeSymbol for determinism
   const sorted = [...plan.entries].sort((a, b) =>
     a.exchangeSymbol.localeCompare(b.exchangeSymbol),
   );
@@ -130,38 +149,42 @@ export function planBinanceSubscriptionRequests(
   for (const entry of sorted) {
     const sym = entry.exchangeSymbol.toLowerCase();
     if (entry.ticker) {
-      streams.push(`${sym}@ticker`);
-      streams.push(`${sym}@bookTicker`);
+      marketStreams.push(`${sym}@ticker`);
+      publicStreams.push(`${sym}@bookTicker`);
     }
     const ordered = sortIntervals(entry.intervals);
     for (const iv of ordered) {
-      streams.push(`${sym}@kline_${iv}`);
+      marketStreams.push(`${sym}@kline_${iv}`);
     }
   }
 
-  // ── Defensive copy of streams ──────────────────────────────────────────
-  const allStreams = [...streams];
-
-  // ── Batch ───────────────────────────────────────────────────────────────
+  // ── Batch by route, maintaining global id sequence ───────────────────
   const requests: BinanceSubscriptionRequest[] = [];
   let currentId = startId;
   const maxSafe = Number.MAX_SAFE_INTEGER;
 
-  for (let i = 0; i < allStreams.length; i += maxStreams) {
-    if (!Number.isSafeInteger(currentId)) {
-      throw new Error('BinanceSubscriptionPlanner: id overflow (not safe integer)');
-    }
-    const chunk = allStreams.slice(i, i + maxStreams);
-    requests.push({
-      method: op,
-      params: chunk,
-      id: currentId,
-    });
-    currentId++;
-    if (currentId > maxSafe) {
-      throw new Error('BinanceSubscriptionPlanner: id overflow');
+  function flushRoute(route: BinanceRoute, streams: readonly string[]): void {
+    for (let i = 0; i < streams.length; i += maxStreams) {
+      if (!Number.isSafeInteger(currentId)) {
+        throw new Error('BinanceSubscriptionPlanner: id overflow (not safe integer)');
+      }
+      const chunk = streams.slice(i, i + maxStreams);
+      requests.push({
+        route,
+        method: op,
+        params: [...chunk], // defensive copy
+        id: currentId,
+      });
+      currentId++;
+      if (currentId > maxSafe) {
+        throw new Error('BinanceSubscriptionPlanner: id overflow');
+      }
     }
   }
+
+  // market first, public second
+  flushRoute('market', marketStreams);
+  flushRoute('public', publicStreams);
 
   return requests;
 }
