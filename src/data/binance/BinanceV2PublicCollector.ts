@@ -1,4 +1,4 @@
-// Stage 3B3C + 3B3C-R1: Binance USD-M Public Collector — dual-route WebSocket lifecycle
+// Stage 3B3C + 3B3C-R1 + 3B3C-R2: Binance USD-M Public Collector
 //
 // Architecture:
 //   SubscriptionPlan → Planner → route batches:
@@ -11,17 +11,19 @@
 //   Kline: x=true → WsKline with confirm=true; x=false → skip
 //   Closed candle dedup by (exchangeSymbol, interval, startTs)
 //   Stale socket isolated by generation token
-//   Inactivity watchdog resets on any data; triggers reconnect after inactivityPeriodMs
-//   24h rotation timer closes socket and triggers reconnect after lifetimeMs
+//   Per-route inactivity watchdog — one route's data cannot mask another's silence
+//   24h rotation timer closes connection and triggers reconnect after lifetimeMs
 //
-// Hardening (R1):
+// Hardening (R1, R2):
 //   - Outbound subscribe JSON strictly { method, params, id } — no internal route field
-//   - Ack race fixed: each route socket builds pendingIds on open; acks recorded
-//     during BOTH connecting and subscribing stages; maybeEnterRunning() checks all
-//     sockets open AND all pendingIds cleared before transitioning to running.
-//     Market ack arriving before public socket open no longer lost.
-//   - watchdog and rotation report failure exactly once (only via beginReconnect's
-//     failure argument, no preceding safeReport).
+//   - Ack race fixed: onAck accepts acks during both connecting and subscribing;
+//     maybeEnterRunning() gates transition until all routes open + all ids acked
+//   - Pre-open onerror rejects start immediately, retires all sockets, reports once
+//   - Reconnect route factory failure closes partial sockets, uses unified reconnect
+//   - Reconnect clears ticker + bookTicker caches (prevents cross-generation merge);
+//     closedCandles preserved across reconnect
+//   - Per-route inactivity watchdog — each required route gets its own timer
+//   - Watchdog/rotation report failure exactly once via beginReconnect's failure arg
 
 import type { SubscriptionPlan } from '../../runtime/market/UniverseManager';
 import type { WsTicker, WsKline } from '../types';
@@ -79,8 +81,8 @@ export interface BinanceV2PublicCollectorOptions {
   readonly clock?: Clock;
   readonly ackTimeoutMs?: number;
   readonly reconnectDelayMs?: number;
-  readonly inactivityPeriodMs?: number;   // default 7200000 (2h)
-  readonly lifetimeMs?: number;            // default 82800000 (23h)
+  readonly inactivityPeriodMs?: number;
+  readonly lifetimeMs?: number;
   readonly plannerOptions?: Pick<BinanceSubscriptionPlannerOptions, 'maxStreamsPerRequest' | 'startId'>;
 }
 
@@ -120,16 +122,11 @@ interface RouteSocket {
   route: BinanceRoute;
   ws: BinanceWSLike | null;
   requests: readonly BinanceSubscriptionRequest[];
-  pendingIds: Set<number>;  // request ids awaiting ack
+  pendingIds: Set<number>;
   isOpen: boolean;
 }
 
 // ── Outbound JSON shape ────────────────────────────────────────────────────
-//
-// Binance USD-M SUBSCRIBE/UNSUBSCRIBE wire format is EXACTLY:
-//   { "method": "SUBSCRIBE", "params": ["btcusdt@ticker", ...], "id": 1 }
-// Any extra field (e.g. internal `route`) is a protocol violation.
-// We project only the three canonical keys here.
 
 function subscribePayload(req: BinanceSubscriptionRequest): string {
   return JSON.stringify({
@@ -155,8 +152,6 @@ const defaultScheduler: BinanceTimerScheduler = {
 
 const defaultClock: Clock = { now: () => Date.now() };
 
-// ── Deep clone plan ───────────────────────────────────────────────────────
-
 function clonePlan(plan: SubscriptionPlan): SubscriptionPlan {
   const entries = plan.entries.map(e => ({
     symbol: e.symbol,
@@ -176,15 +171,12 @@ export class BinanceV2PublicCollector {
   private generation = 0;
   private manualStop = false;
 
-  // Route sockets
   private routeSockets: RouteSocket[] = [];
 
-  // WS facility
   private wsFactory: BinanceWebSocketFactory;
   private scheduler: BinanceTimerScheduler;
   private clock: Clock;
 
-  // Promise
   private startResolve: ((value: void | PromiseLike<void>) => void) | null = null;
   private startReject: ((reason: unknown) => void) | null = null;
   private startPromise: Promise<void> | null = null;
@@ -192,16 +184,15 @@ export class BinanceV2PublicCollector {
   // Timers
   private ackTimerHandle: unknown = undefined;
   private reconnectTimerHandle: unknown = undefined;
-  private inactivityTimerHandle: unknown = undefined;
+  private inactivityTimers: Map<string, unknown> = new Map();
   private rotationTimerHandle: unknown = undefined;
 
   // Data
-  private tickerCaches: Map<string, TickerCache> = new Map();   // symbol lowercase key
+  private tickerCaches: Map<string, TickerCache> = new Map();
   private bookTickerCaches: Map<string, BookTickerCache> = new Map();
-  private closedCandles: Set<string> = new Set();                // keyStr() set
+  private closedCandles: Set<string> = new Set();
   private capturedRequests: readonly BinanceSubscriptionRequest[] = [];
 
-  // Callbacks
   private tickerHandler: ((t: WsTicker) => void) | null = null;
   private klineHandler: ((k: WsKline) => void) | null = null;
   private errorHandler: ((f: BinanceCollectorFailure) => void) | null = null;
@@ -209,7 +200,7 @@ export class BinanceV2PublicCollector {
   constructor(options: BinanceV2PublicCollectorOptions) {
     for (const v of [options.ackTimeoutMs ?? 10000, options.reconnectDelayMs ?? 3000, options.inactivityPeriodMs ?? 7_200_000, options.lifetimeMs ?? 82_800_000]) {
       if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v) || v <= 0) {
-        throw new Error(`BinanceV2PublicCollector: timeout/delay values must be positive integers`);
+        throw new Error('BinanceV2PublicCollector: timeout/delay values must be positive integers');
       }
     }
 
@@ -238,14 +229,11 @@ export class BinanceV2PublicCollector {
       plannerOptions: options.plannerOptions,
     };
 
-    // Build RouteSocket stubs at construct (no WS yet)
     this.initRouteSockets();
   }
 
   get state(): BinanceCollectorState { return this._state; }
   get planVersion(): number { return this._planVersion; }
-
-  // ── Handlers ─────────────────────────────────────────────────────────────
 
   onTicker(h: (t: WsTicker) => void): void { this.tickerHandler = h; }
   onKline(h: (k: WsKline) => void): void { this.klineHandler = h; }
@@ -271,12 +259,10 @@ export class BinanceV2PublicCollector {
       this.startResolve = resolve;
       this.startReject = reject;
 
-      // Init route sockets
       this.initRouteSockets();
       const socketsToCreate = this.routeSockets.length;
 
       if (socketsToCreate === 0) {
-        // No subscriptions needed — immediate running
         this.enterRunning(gen);
         return;
       }
@@ -297,7 +283,6 @@ export class BinanceV2PublicCollector {
           if (this.generation !== gen || this.manualStop) return;
           capturedRs.isOpen = true;
 
-          // Build pendingIds immediately and send subscribes
           capturedRs.pendingIds = new Set(capturedRs.requests.map(r => r.id));
           for (const req of capturedRs.requests) {
             try {
@@ -308,11 +293,9 @@ export class BinanceV2PublicCollector {
             }
           }
 
-          // Move to subscribing on first open; maybeEnterRunning will gate
           if (this._state === 'connecting') {
             this._state = 'subscribing';
           }
-          // Start ack timeout once we have pending ids
           if (this.ackTimerHandle === undefined && capturedRs.pendingIds.size > 0) {
             this.ackTimerHandle = this.scheduler.setTimeout(() => {
               if (this.generation === gen && !this.manualStop) {
@@ -340,7 +323,14 @@ export class BinanceV2PublicCollector {
 
         ws.onerror = () => {
           if (this.generation !== gen || this.manualStop) return;
-          if (this._state === 'running') this.beginReconnect(gen);
+          if (this._state === 'connecting' || this._state === 'subscribing') {
+            // Reject start immediately — do NOT wait for onclose which may never fire.
+            this.handleStartupError(gen, new Error('socket error during startup'), 'connect');
+            return;
+          }
+          if (this._state === 'running') {
+            this.beginReconnect(gen);
+          }
         };
       }
     });
@@ -380,7 +370,11 @@ export class BinanceV2PublicCollector {
   private clearTimers(): void {
     if (this.ackTimerHandle !== undefined) { this.scheduler.clearTimeout(this.ackTimerHandle); this.ackTimerHandle = undefined; }
     if (this.reconnectTimerHandle !== undefined) { this.scheduler.clearTimeout(this.reconnectTimerHandle); this.reconnectTimerHandle = undefined; }
-    if (this.inactivityTimerHandle !== undefined) { this.scheduler.clearTimeout(this.inactivityTimerHandle); this.inactivityTimerHandle = undefined; }
+    // Clear per-route inactivity timers
+    for (const [route, handle] of this.inactivityTimers) {
+      this.scheduler.clearTimeout(handle);
+    }
+    this.inactivityTimers.clear();
     if (this.rotationTimerHandle !== undefined) { this.scheduler.clearTimeout(this.rotationTimerHandle); this.rotationTimerHandle = undefined; }
   }
 
@@ -420,11 +414,6 @@ export class BinanceV2PublicCollector {
     this.safeReport(phase, error);
   }
 
-  /**
-   * Transition to running only when ALL necessary sockets are open AND all
-   * pendingIds across all routes are cleared. Called from onopen and onAck.
-   * Safe to call any time — no-op if conditions not met.
-   */
   private maybeEnterRunning(gen: number): void {
     if (this.generation !== gen || this.manualStop) return;
     if (this._state !== 'connecting' && this._state !== 'subscribing') return;
@@ -435,7 +424,6 @@ export class BinanceV2PublicCollector {
     const totalPending = this.routeSockets.reduce((sum, r) => sum + r.pendingIds.size, 0);
     if (totalPending > 0) return;
 
-    // Clear ack timer (if any) and enter running
     if (this.ackTimerHandle !== undefined) {
       this.scheduler.clearTimeout(this.ackTimerHandle);
       this.ackTimerHandle = undefined;
@@ -456,15 +444,14 @@ export class BinanceV2PublicCollector {
       resolve();
     }
 
-    this.resetInactivityTimer(gen);
+    // Start per-route inactivity watchdogs
+    for (const rs of this.routeSockets) {
+      this.scheduleInactivityTimer(gen, rs.route);
+    }
     this.startRotationTimer(gen);
   }
 
   // ── Unified reconnect ──────────────────────────────────────────────────
-  //
-  // Single entry point. Callers pass a `failure` ONLY when they want exactly
-  // one onError report. Watchdog and rotation pass failure here and do NOT
-  // call safeReport themselves — this guarantees one report per physical fault.
 
   private beginReconnect(expectedGeneration: number, failure?: BinanceCollectorFailure): void {
     if (this.manualStop) return;
@@ -472,10 +459,15 @@ export class BinanceV2PublicCollector {
     if (this.generation !== expectedGeneration) return;
 
     if (failure) this.safeReport(failure.phase, failure.error);
+
+    // Clear caches on reconnect — prevents stale ticker/bookTicker from a
+    // previous connection generation merging with fresh data from the new one.
+    // closedCandles is PRESERVED across reconnect (dedup state is durable).
+    this.tickerCaches.clear();
+    this.bookTickerCaches.clear();
+
     this.retireAllSockets(expectedGeneration);
 
-    // If a reconnect is already pending, do not schedule a second timer.
-    // Note: retireAllSockets cleared handles, so we check state instead.
     if (this._state === 'reconnect_wait') return;
 
     this._state = 'reconnect_wait';
@@ -493,7 +485,6 @@ export class BinanceV2PublicCollector {
   private startReconnectAttempt(gen: number): void {
     if (this.generation !== gen || this.manualStop) return;
 
-    // Re-init route sockets from saved requests
     this.initRouteSockets();
     const total = this.routeSockets.length;
 
@@ -507,18 +498,10 @@ export class BinanceV2PublicCollector {
         const endpoint = rs.route === 'market' ? this.options.marketEndpoint : this.options.publicEndpoint;
         rs.ws = this.wsFactory(endpoint);
       } catch (err: any) {
-        // Could not create socket — schedule another reconnect
-        this.safeReport('connect', err as Error);
-        this._state = 'reconnect_wait';
-        if (this.reconnectTimerHandle === undefined) {
-          this.reconnectTimerHandle = this.scheduler.setTimeout(() => {
-            this.reconnectTimerHandle = undefined;
-            if (this.generation !== gen || this.manualStop) return;
-            this._state = 'connecting';
-            const newGen = ++this.generation;
-            this.startReconnectAttempt(newGen);
-          }, this.options.reconnectDelayMs);
-        }
+        // Factory failed — close any sockets already created in this iteration
+        // and use unified reconnect (no custom bypass logic).
+        this.closeAllSockets();
+        this.beginReconnect(gen, { phase: 'connect', error: err as Error });
         return;
       }
       rs.isOpen = false;
@@ -529,7 +512,6 @@ export class BinanceV2PublicCollector {
         if (this.generation !== gen || this.manualStop) return;
         capturedRs.isOpen = true;
 
-        // Build pendingIds immediately and send subscribes
         capturedRs.pendingIds = new Set(capturedRs.requests.map(r => r.id));
         for (const req of capturedRs.requests) {
           try { ws.send(subscribePayload(req)); } catch (err: any) {
@@ -542,7 +524,6 @@ export class BinanceV2PublicCollector {
         if (this._state === 'connecting') {
           this._state = 'subscribing';
         }
-        // Start ack timeout on first open
         if (this.ackTimerHandle === undefined && capturedRs.pendingIds.size > 0) {
           this.ackTimerHandle = this.scheduler.setTimeout(() => {
             if (this.generation === gen && !this.manualStop) {
@@ -575,7 +556,6 @@ export class BinanceV2PublicCollector {
   // ── Route init ──────────────────────────────────────────────────────────
 
   private initRouteSockets(): void {
-    // Clear old — they may carry stale ws references
     this.routeSockets = [];
 
     const marketReqs = this.capturedRequests.filter(r => r.route === 'market');
@@ -594,8 +574,8 @@ export class BinanceV2PublicCollector {
   private onMessage(data: unknown, gen: number, routeSocket: RouteSocket): void {
     if (this.generation !== gen) return;
 
-    // Reset inactivity timer on any data
-    this.resetInactivityTimer(gen);
+    // Per-route inactivity timer: reset the timer for THIS route only.
+    this.resetRouteInactivityTimer(gen, routeSocket.route);
 
     let frame: BinanceParsedFrame;
     try {
@@ -631,17 +611,12 @@ export class BinanceV2PublicCollector {
 
   private onAck(id: number, gen: number, routeSocket: RouteSocket): void {
     if (this.generation !== gen) return;
-    // Accept acks during connecting OR subscribing — early market acks
-    // arriving before public socket opens must be recorded, not lost.
     if (this._state !== 'connecting' && this._state !== 'subscribing') return;
 
-    // Only known pending ids count
     if (routeSocket.pendingIds.has(id)) {
       routeSocket.pendingIds.delete(id);
-      // Try to enter running — no-op if other routes still pending
       this.maybeEnterRunning(gen);
     }
-    // Duplicate/unknown ack → ignore (no state change, no error)
   }
 
   private onProtocolError(frame: { message: string; code: string }, gen: number): void {
@@ -651,7 +626,6 @@ export class BinanceV2PublicCollector {
       return;
     }
     if (this._state === 'running') {
-      // Pass failure to beginReconnect so it reports exactly once
       this.beginReconnect(gen, { phase: 'subscribe', error: new Error(`${frame.code} ${frame.message}`) });
     }
   }
@@ -671,7 +645,6 @@ export class BinanceV2PublicCollector {
           volume24h: ev.volume24h,
           ts: ev.ts,
         });
-        // Try merge
         const merged = this.tryMerge(ev.exchangeSymbol);
         if (merged) tickersToEmit.push(merged);
       } else if (ev.kind === 'bookTicker') {
@@ -683,8 +656,7 @@ export class BinanceV2PublicCollector {
         const merged = this.tryMerge(ev.exchangeSymbol);
         if (merged) tickersToEmit.push(merged);
       } else if (ev.kind === 'kline') {
-        if (!ev.closed) continue; // skip open candles
-        // Dedup
+        if (!ev.closed) continue;
         const k = candleKey(ev.exchangeSymbol, ev.interval, ev.startTs);
         const sk = keyStr(k);
         if (this.closedCandles.has(sk)) continue;
@@ -704,7 +676,7 @@ export class BinanceV2PublicCollector {
               ts: ev.startTs,
               confirm: true,
             });
-          } catch (err: any) { this.safeReport('parse', err ); }
+          } catch (err: any) { this.safeReport('parse', err); }
         }
       }
     }
@@ -735,27 +707,36 @@ export class BinanceV2PublicCollector {
     };
   }
 
-  // ── Inactivity watchdog ────────────────────────────────────────────────
+  // ── Per-route inactivity watchdog ──────────────────────────────────────
   //
+  // Each required route (market, public) gets its own inactivity timer.
+  // Data on one route does NOT reset the other route's timer.
+  // When any route times out: all sockets retired + single reconnect.
   // Reports failure exactly once via beginReconnect's failure argument.
-  // No preceding safeReport call.
 
-  private resetInactivityTimer(gen: number): void {
+  private resetRouteInactivityTimer(gen: number, route: BinanceRoute): void {
     if (this.generation !== gen) return;
-    if (this.inactivityTimerHandle !== undefined) {
-      this.scheduler.clearTimeout(this.inactivityTimerHandle);
-      this.inactivityTimerHandle = undefined;
+    const existing = this.inactivityTimers.get(route);
+    if (existing !== undefined) {
+      this.scheduler.clearTimeout(existing);
     }
-    this.inactivityTimerHandle = this.scheduler.setTimeout(() => {
+    this.scheduleInactivityTimer(gen, route);
+  }
+
+  private scheduleInactivityTimer(gen: number, route: BinanceRoute): void {
+    if (this.generation !== gen) return;
+    const handle = this.scheduler.setTimeout(() => {
       if (this.generation !== gen || this.manualStop) return;
-      this.beginReconnect(gen, { phase: 'watchdog', error: new Error('inactivity timeout') });
+      const existing = this.inactivityTimers.get(route);
+      if (existing === handle) {
+        this.inactivityTimers.delete(route);
+      }
+      this.beginReconnect(gen, { phase: 'watchdog', error: new Error(`inactivity timeout: ${route} route`) });
     }, this.options.inactivityPeriodMs);
+    this.inactivityTimers.set(route, handle);
   }
 
   // ── Active connection rotation ──────────────────────────────────────────
-  //
-  // Reports failure exactly once via beginReconnect's failure argument.
-  // No preceding safeReport call.
 
   private startRotationTimer(gen: number): void {
     if (this.generation !== gen) return;

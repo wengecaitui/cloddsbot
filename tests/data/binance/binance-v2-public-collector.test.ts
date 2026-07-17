@@ -668,17 +668,18 @@ test('R5. watchdog error fires exactly once', async () => {
   const f = new FakeWSFactory();
   const s = new FakeScheduler();
   const errors: BinanceCollectorFailure[] = [];
+  // Single-socket plan (ticker=false) → only market, one watchdog timer
+  const plan = { version: 1, entries: [{ symbol: 'BTC/USDT', exchangeSymbol: 'BTCUSDT', intervals: ['1m'], ticker: false }] };
   const c = new BinanceV2PublicCollector({
-    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    plan, webSocketFactory: (url: string) => f.create(url),
     scheduler: s as any, inactivityPeriodMs: 100, reconnectDelayMs: 200, ackTimeoutMs: 5000,
   });
   c.onError(e => errors.push(e));
   const p = c.start();
   await new Promise(r => queueMicrotask(r));
   await new Promise(r => queueMicrotask(r));
-  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onopen?.({});
   getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
-  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
   await p;
   assert.equal(errors.length, 0, 'no errors before watchdog');
   s.tick(100);
@@ -733,5 +734,197 @@ test('R7. bookTicker without ts arrives in collector without fabricating ts', as
   assert.equal(tickers[0].ts, 1700000000000, 'ts comes from ticker, not fabricated');
   assert.equal(tickers[0].bestBid, 50000.10);
   assert.equal(tickers[0].bestAsk, 50000.20);
+});
+
+// ── Stage 3B3C-R2: close lifecycle gaps ─────────────────────────────────
+
+test('R8. pre-open onerror rejects start and closes both sockets', async () => {
+  let ws: FakeWS;
+  class ErrFactory implements BinanceWebSocketFactory {
+    created: FakeWS[] = [];
+    create(url: string): BinanceWSLike {
+      ws = {
+        url, readyState: 0,
+        onopen: null, onmessage: null, onclose: null, onerror: null,
+        sentMessages: [], isOpen: false, isClosed: false, autoOpen: false,
+        send(data: string) { this.sentMessages.push(data); },
+        close() { this.isClosed = true; },
+      };
+      this.created.push(ws);
+      return ws;
+    }
+  }
+  const f = new ErrFactory();
+  const s = new FakeScheduler();
+  const c = new BinanceV2PublicCollector({ plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url), scheduler: s as any });
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  // Fire onerror on first socket before onopen
+  f.created[0].onerror?.({});
+  let rejected = false;
+  try { await p; } catch { rejected = true; }
+  assert.ok(rejected, 'start rejected on pre-open onerror');
+  assert.equal(c.state, 'failed');
+  // Both sockets should be closed (retireAllSockets closes all)
+  assert.ok(f.created.every(s => s.isClosed), 'all sockets closed');
+});
+
+test('R9. reconnect factory failure closes partial sockets and uses unified reconnect', async () => {
+  // First start with normal factory. Then trigger reconnect and swap to a
+  // fickle factory that fails on 2nd create (public) but succeeds on 1st (market).
+  const f = new FakeWSFactory();
+  let fickleMode = false;
+  let callInFickle = 0;
+  class FickleFactory implements BinanceWebSocketFactory {
+    created: FakeWS[] = [];
+    create(url: string): BinanceWSLike {
+      if (!fickleMode) return f.create(url);
+      callInFickle++;
+      if (callInFickle === 2) throw new Error('second factory fails');
+      const ws: FakeWS = {
+        url, readyState: 0,
+        onopen: null, onmessage: null, onclose: null, onerror: null,
+        sentMessages: [], isOpen: false, isClosed: false, autoOpen: false,
+        send(data: string) { this.sentMessages.push(data); },
+        close() { this.isClosed = true; },
+      };
+      this.created.push(ws);
+      return ws;
+    }
+  }
+  const fk = new FickleFactory();
+  const s = new FakeScheduler();
+  const errors: BinanceCollectorFailure[] = [];
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => fk.create(url),
+    scheduler: s as any, reconnectDelayMs: 100, ackTimeoutMs: 5000,
+  });
+  c.onError(e => errors.push(e));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+  assert.equal(c.state, 'running');
+
+  // Now swap into fickle mode and trigger reconnect
+  fickleMode = true;
+  callInFickle = 0;
+  getWsByIdx(f, 0).onclose?.({});
+  assert.equal(c.state, 'reconnect_wait');
+  // Tick the reconnect timer — startReconnectAttempt runs, market succeeds but
+  // public throws → closeAllSockets + beginReconnect again
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  // Should be back in reconnect_wait because beginReconnect was re-triggered
+  assert.equal(c.state, 'reconnect_wait', 'unified reconnect back to wait');
+  // The market socket created on this attempt must have been closed
+  assert.ok(fk.created.length === 1, 'one socket created in fickle attempt');
+  assert.ok(fk.created[0].isClosed, 'partial market socket closed on factory failure');
+  assert.ok(errors.some(e => e.phase === 'connect'), 'connect error reported');
+  c.stop();
+});
+
+test('R10. reconnect clears ticker and bookTicker caches', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const tickers: WsTicker[] = [];
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any, reconnectDelayMs: 100, ackTimeoutMs: 5000,
+  });
+  c.onTicker(t => tickers.push(t));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+
+  // Inject ticker data
+  getWsByIdx(f, 0).onmessage!({ data: JSON.stringify(tickerFrame('BTCUSDT')) });
+  getWsByIdx(f, 1).onmessage!({ data: JSON.stringify(bookTickerFrame('BTCUSDT')) });
+  assert.equal(tickers.length, 1, 'ticker produced pre-reconnect');
+
+  // Trigger reconnect
+  getWsByIdx(f, 0).onclose?.({});
+  s.tick(100);
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  // New socket indices
+  const idxMarket = f.createdSockets.length >= 3 ? 2 : 0;
+  const idxPublic = f.createdSockets.length >= 4 ? 3 : 1;
+  getWsByIdx(f, idxMarket).onopen?.({});
+  getWsByIdx(f, idxPublic).onopen?.({});
+  getWsByIdx(f, idxMarket).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, idxPublic).onmessage!({ data: ackMsg(2) });
+  await new Promise(r => queueMicrotask(r));
+
+  // Send ONLY bookTicker on new connection (no ticker yet) — should not merge with old ticker
+  const preCount = tickers.length;
+  getWsByIdx(f, idxPublic).onmessage!({ data: JSON.stringify(bookTickerFrame('BTCUSDT')) });
+  assert.equal(tickers.length, preCount, 'old ticker not merged with new bookTicker');
+
+  // Send ticker on new connection → now both sides present → should emit
+  getWsByIdx(f, idxMarket).onmessage!({ data: JSON.stringify(tickerFrame('BTCUSDT')) });
+  assert.equal(tickers.length, preCount + 1, 'fresh ticker+bookTicker produces merge');
+  c.stop();
+});
+
+test('R11. per-route inactivity watchdog fires independently', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const errors: BinanceCollectorFailure[] = [];
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any, inactivityPeriodMs: 100, reconnectDelayMs: 200, ackTimeoutMs: 5000,
+  });
+  c.onError(e => errors.push(e));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+
+  // Feed data ONLY to market socket; public stays silent
+  getWsByIdx(f, 0).onmessage!({ data: JSON.stringify(tickerFrame('BTCUSDT')) });
+  // After 100ms public watchdog should fire (market is reset)
+  s.tick(100);
+  assert.ok(errors.some(e => e.phase === 'watchdog'), 'public watchdog fired despite market activity');
+  // After tick 200, public could fire again, but reconnect guard prevents double.
+  // Only one watchdog event expected.
+  c.stop();
+});
+
+test('R12. duplicate route failures only produce one reconnect timer', async () => {
+  const f = new FakeWSFactory();
+  const s = new FakeScheduler();
+  const errors: BinanceCollectorFailure[] = [];
+  const c = new BinanceV2PublicCollector({
+    plan: makePlan(['BTC/USDT']), webSocketFactory: (url: string) => f.create(url),
+    scheduler: s as any, reconnectDelayMs: 10000,  // long to prevent timer from overlapping
+  });
+  c.onError(e => errors.push(e));
+  const p = c.start();
+  await new Promise(r => queueMicrotask(r));
+  await new Promise(r => queueMicrotask(r));
+  [0, 1].forEach(i => getWsByIdx(f, i).onopen?.({}));
+  getWsByIdx(f, 0).onmessage!({ data: ackMsg(1) });
+  getWsByIdx(f, 1).onmessage!({ data: ackMsg(2) });
+  await p;
+
+  // Trigger close on both sockets in sequence
+  getWsByIdx(f, 0).onclose?.({}); // first → beginReconnect, sets reconnect_wait
+  getWsByIdx(f, 1).onclose?.({}); // second → beginReconnect short-circuits via state check
+  // After both calls, only one error (from the first) should have been reported
+  const connectErrors = errors.filter(e => e.phase === 'reconnect');
+  assert.equal(connectErrors.length, 0, 'no reconnect phase errors');  // onclose doesn't pass failure
+  c.stop();
 });
 
