@@ -20,3 +20,17 @@ export type {
 export {
   createBinanceTradingRuntime,
 } from './BinanceTradingRuntime';
+
+// Stage 3B4A: Exchange Market Data Providers
+export type {
+  ExchangeMarketDataProvider,
+  ExchangeId,
+} from './ExchangeMarketDataProvider';
+export {
+  createBitgetMarketDataProvider,
+  type BitgetMarketDataProviderOptions,
+} from './BitgetMarketDataProvider';
+export {
+  createBinanceMarketDataProvider,
+  type BinanceMarketDataProviderOptions,
+} from './BinanceMarketDataProvider';

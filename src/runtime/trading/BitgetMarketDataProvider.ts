@@ -1,0 +1,196 @@
+// Stage 3B4A: Bitget Market Data Provider
+//
+// Wraps all Bitget V2 Public Collector configuration snapshot + creation.
+// Used by createBitgetTradingRuntime to delegate collector construction.
+//
+// Migration contract:
+//   - Snapshot logic and semantics identical to the prior
+//     snapshotBitgetConfig() in BitgetTradingRuntime.ts.
+//   - Caller-supplied `bitget.plan` (when injected via `any`) is overridden by
+//     the runtime-supplied plan, which is passed as the LAST field.
+//   - Per-instance error handler binds the live Collector's planVersion so
+//     restart (which creates a new Collector) re-binds the binding.
+//   - Provider creation does NOT open any socket. Sockets are only opened
+//     when the returned Collector's start() is called.
+
+import type { MarketDataCollectorPort } from '../market/MarketDataRuntime';
+import type { SubscriptionPlan } from '../market/UniverseManager';
+import type { ExchangeMarketDataProvider, ExchangeId } from './ExchangeMarketDataProvider';
+
+import {
+  BitgetV2PublicCollector,
+  type BitgetV2PublicCollectorOptions,
+  type BitgetCollectorFailure,
+  type BitgetWebSocketFactory,
+  type BitgetTimerScheduler,
+} from '../../data/bitget/BitgetV2PublicCollector';
+import type { BitgetSubscriptionPlannerOptions } from '../../data/bitget/SubscriptionPlanner';
+
+export interface BitgetMarketDataProviderOptions {
+  /**
+   * Bitget V2 Collector tuning. All fields optional except `plan` which is
+   * supplied by the runtime on each restart. NEVER read `bitget.plan` even if
+   * the caller injects it via `any` — the runtime plan always overrides.
+   */
+  readonly bitget?: Omit<BitgetV2PublicCollectorOptions, 'plan'>;
+
+  /**
+   * Optional Collector failure callback. Each Collector instance binds its
+   * own handler; restart swaps the binding. The callback receives the
+   * Collector's actual planVersion at the time of the failure.
+   */
+  readonly onBitgetCollectorError?: (
+    failure: BitgetCollectorFailure & { readonly planVersion: number }
+  ) => void;
+}
+
+// ── Internal snapshot types ────────────────────────────────────────────────
+
+interface SnapshotPlannerOptions {
+  readonly maxArgsPerBatch?: number;
+  readonly maxPayloadBytes?: number;
+}
+
+interface SnapshotBitgetConfig {
+  readonly endpoint?: string;
+  readonly webSocketFactory?: BitgetWebSocketFactory;
+  readonly scheduler?: BitgetTimerScheduler;
+  readonly ackTimeoutMs: number;
+  readonly heartbeatIntervalMs: number;
+  readonly pongTimeoutMs: number;
+  readonly reconnectDelayMs: number;
+  readonly plannerOptions: SnapshotPlannerOptions;
+}
+
+const DEFAULTS = {
+  ackTimeoutMs: 3000,
+  heartbeatIntervalMs: 30000,
+  pongTimeoutMs: 10000,
+  reconnectDelayMs: 3000,
+} as const;
+
+/**
+ * Build a private snapshot of all Bitget collector configuration the Provider
+ * needs to construct a Collector on demand.
+ *
+ * Returns null if no `bitget` bag was supplied so the Collector can fall back
+ * to its built-in defaults (only useful for tests). The caller's original
+ * objects are NOT retained by reference except for `webSocketFactory` (a
+ * function — we capture the function value at snapshot time) and the bound
+ * `scheduler.setTimeout` / `scheduler.clearTimeout` methods.
+ */
+function snapshotBitgetConfig(
+  bitget: BitgetMarketDataProviderOptions['bitget'],
+): SnapshotBitgetConfig | null {
+  if (!bitget) return null;
+
+  // ── endpoint ────────────────────────────────────────────────────────────
+  // Defensive copy: string is immutable but the caller can re-assign
+  // `bitget.endpoint` later. We capture the value at snapshot time.
+  const endpoint = bitget.endpoint;
+
+  // ── webSocketFactory ───────────────────────────────────────────────────
+  // Capture the function value at snapshot time. If the caller replaces
+  // `bitget.webSocketFactory` later, our snapshot still references the
+  // originally supplied function.
+  const webSocketFactory = bitget.webSocketFactory;
+  if (typeof webSocketFactory !== 'function' && webSocketFactory !== undefined) {
+    throw new TypeError('BitgetMarketDataProvider: bitget.webSocketFactory must be a function when provided');
+  }
+
+  // ── scheduler ──────────────────────────────────────────────────────────
+  // Bind the scheduler methods at snapshot time. A wrapper object ensures
+  // that replacing `scheduler.setTimeout` / `scheduler.clearTimeout` on the
+  // caller's object after Provider construction cannot affect Collectors
+  // created subsequently.
+  //
+  // If the caller does not supply a scheduler we pass `undefined` through and
+  // let the Collector use its own default scheduler.
+  const userScheduler = bitget.scheduler;
+  let scheduler: BitgetTimerScheduler | undefined;
+  if (userScheduler) {
+    const setTimeoutRef = userScheduler.setTimeout.bind(userScheduler);
+    const clearTimeoutRef = userScheduler.clearTimeout.bind(userScheduler);
+    scheduler = {
+      setTimeout: setTimeoutRef,
+      clearTimeout: clearTimeoutRef,
+    };
+  }
+
+  // ── timeout / delay fields ─────────────────────────────────────────────
+  const ackTimeoutMs = bitget.ackTimeoutMs ?? DEFAULTS.ackTimeoutMs;
+  const heartbeatIntervalMs = bitget.heartbeatIntervalMs ?? DEFAULTS.heartbeatIntervalMs;
+  const pongTimeoutMs = bitget.pongTimeoutMs ?? DEFAULTS.pongTimeoutMs;
+  const reconnectDelayMs = bitget.reconnectDelayMs ?? DEFAULTS.reconnectDelayMs;
+
+  // ── plannerOptions ─────────────────────────────────────────────────────
+  // Create a NEW object. Only copy the two known fields. This severs the
+  // link to the caller's `plannerOptions` so later mutations (e.g. caller
+  // changes `bitget.plannerOptions.maxArgsPerBatch`) cannot influence
+  // already-configured Collectors.
+  const userPlanner = bitget.plannerOptions;
+  const plannerOptions: SnapshotPlannerOptions = {
+    maxArgsPerBatch: userPlanner?.maxArgsPerBatch,
+    maxPayloadBytes: userPlanner?.maxPayloadBytes,
+  };
+
+  return {
+    endpoint,
+    webSocketFactory,
+    scheduler,
+    ackTimeoutMs,
+    heartbeatIntervalMs,
+    pongTimeoutMs,
+    reconnectDelayMs,
+    plannerOptions,
+  };
+}
+
+/**
+ * Create a Bitget Market Data Provider.
+ *
+ * The Provider:
+ *   - Snapshots all Bitget collector configuration ONCE at creation time.
+ *   - Returns a NEW BitgetV2PublicCollector per createCollector(plan) call
+ *     (no caching, no singleton).
+ *   - Passes the runtime-supplied SubscriptionPlan as the LAST field so
+ *     caller-supplied `bitget.plan` (when injected via `any`) is overridden.
+ *   - Binds onBitgetCollectorError with the live Collector's planVersion.
+ *
+ * Provider creation does NOT open any socket. Sockets are only opened when
+ * the returned Collector's start() is called.
+ */
+export function createBitgetMarketDataProvider(
+  options: BitgetMarketDataProviderOptions
+): ExchangeMarketDataProvider {
+  const { bitget, onBitgetCollectorError } = options;
+  const snapshot = snapshotBitgetConfig(bitget);
+
+  return {
+    exchange: 'bitget' as ExchangeId,
+    createCollector(plan: SubscriptionPlan): MarketDataCollectorPort {
+      let collector: BitgetV2PublicCollector;
+      if (snapshot) {
+        collector = new BitgetV2PublicCollector({
+          plan,
+          ...snapshot,
+        });
+      } else {
+        collector = new BitgetV2PublicCollector({ plan });
+      }
+
+      // Bind per-instance error handler. `collector.planVersion` is read at
+      // failure time so stale callbacks from a previous Collector instance
+      // carry the previous plan version (the Collector itself already guards
+      // stale generation via internal generation token).
+      collector.onError((failure: BitgetCollectorFailure) => {
+        onBitgetCollectorError?.({
+          ...failure,
+          planVersion: collector.planVersion,
+        });
+      });
+
+      return collector;
+    },
+  };
+}
