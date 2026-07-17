@@ -524,16 +524,14 @@ export class BitgetV2PublicCollector {
       try {
         this.ws.send('ping');
       } catch (err: any) {
-        this.safeReport('heartbeat', err);
         this.clearTimers();
-        this.beginReconnect(gen, { phase: 'heartbeat', error: err });
+        this.beginReconnect(gen, { phase: 'heartbeat', error: err as Error });
         return;
       }
 
       // Start pong wait
       this.pongTimerHandle = this.scheduler.setTimeout(() => {
         if (this.generation !== gen || this.manualStop) return;
-        this.safeReport('heartbeat', new Error('pong timeout'));
         this.beginReconnect(gen, { phase: 'heartbeat', error: new Error('pong timeout') });
       }, this.options.pongTimeoutMs);
     }, this.options.heartbeatIntervalMs);
@@ -558,8 +556,7 @@ export class BitgetV2PublicCollector {
     try {
       ws = this.wsFactory(this.options.endpoint);
     } catch (err: any) {
-      this.safeReport('reconnect', err);
-      this.beginReconnect(this.generation, { phase: 'reconnect', error: err });
+      this.beginReconnect(this.generation, { phase: 'reconnect', error: err as Error });
       return;
     }
 
@@ -579,15 +576,13 @@ export class BitgetV2PublicCollector {
         this._state = 'subscribing';
         for (const req of this.capturedRequests) {
           try { ws.send(JSON.stringify(req)); } catch (err: any) {
-            this.safeReport('reconnect', err);
-            this.beginReconnect(this.generation, { phase: 'reconnect', error: err });
+            this.beginReconnect(this.generation, { phase: 'reconnect', error: err as Error });
             return;
           }
         }
         if (this.expectedAckKeys.size > 0) {
           this.ackTimerHandle = this.scheduler.setTimeout(() => {
             if (this.generation === gen && !this.manualStop) {
-              this.safeReport('reconnect', new Error(`reconnect ack timeout: ${this.expectedAckKeys.size} pending`));
               this.beginReconnect(this.generation, { phase: 'reconnect', error: new Error('reconnect ack timeout') });
             }
           }, this.options.ackTimeoutMs);
