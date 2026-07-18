@@ -1,5 +1,9 @@
-// Stage 3A1-R2: Trading Event types — Exact 3-event flat contract
+// Stage 3A1-R2 + 3B4C2: Trading Event types — Exact 3-event flat contract
 // Reuses WsTicker, WsKline, MarketBiasReportFull. No copy/reduction.
+//
+// Stage 3B4C2: exchange provenance comes from ticker.exchange/kline.exchange.
+// No independent `source` field — EventBus payloads are NOT extended.
+// The event bus validates exchange at publish boundary (see TradingEventBus.ts).
 
 import type { WsTicker, WsKline } from '../data/types';
 import type { MarketBiasReportFull } from '../types/market-bias';

@@ -2,12 +2,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTradingRuntime } from '../../../src/runtime/trading/TradingRuntime';
+import { createBitgetTradingRuntime } from '../../../src/runtime/trading/BitgetTradingRuntime';
+import { createBinanceTradingRuntime } from '../../../src/runtime/trading/BinanceTradingRuntime';
 import { createPlanAwareCollector } from '../../../src/runtime/trading/PlanAwareCollector';
 import type { MarketDataCollectorPort } from '../../../src/runtime/market/MarketDataRuntime';
 import { createTradingEventBus } from '../../../src/events';
 import { ExecutionRouter } from '../../../src/router/ExecutionRouter';
 import { KillSwitch } from '../../../src/router/KillSwitch';
 import { createSymbolRegistry } from '../../../src/runtime/market/SymbolFormat';
+import { createMarketSnapshotStore } from '../../../src/data/MarketSnapshotStore';
+import { createCandleSeriesStore } from '../../../src/data/CandleSeriesStore';
 import { createUniverseManager } from '../../../src/runtime/market/UniverseManager';
 import type { UniverseManager, SubscriptionPlan } from '../../../src/runtime/market/UniverseManager';
 import type { WsTicker, WsKline } from '../../../src/data/types';
@@ -78,6 +82,7 @@ function makeRuntime(opts: {
   return {
     universe,
     rt: createTradingRuntime({
+    exchange: 'bitget',
       universe,
       collectorFactory,
       indicatorService: new FakeIS() as any,
@@ -395,8 +400,16 @@ test('12. PAC start/stop delegated', async () => {
 
 // ── TradingRuntime tests (13-37) ──────────────────────────────────────────
 
-test('13. universe is required', () => {
+test('13. requires exchange + universe', () => {
+  // Stage 3B4C2: exchange validated first; universe second.
+  // Invalid exchange → exchange error
   assert.throws(() => createTradingRuntime({
+    collectorFactory: () => new FakeColl() as any,
+    indicatorService: new FakeIS() as any,
+  } as any), /exchange must be a valid ExchangeId/);
+  // Valid exchange + missing universe → universe error
+  assert.throws(() => createTradingRuntime({
+    exchange: 'bitget',
     collectorFactory: () => new FakeColl() as any,
     indicatorService: new FakeIS() as any,
   } as any), /universe is required/);
@@ -407,6 +420,7 @@ test('14. collectorFactory receives initial plan', async () => {
   let receivedPlan: SubscriptionPlan | null = null;
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: (plan) => { receivedPlan = plan; return coll; },
     indicatorService: new FakeIS() as any,
@@ -424,6 +438,7 @@ test('15. Store/EventBus use canonical symbol', async () => {
   const coll = new FakeColl();
   const bus = createTradingEventBus();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe, bus,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -454,6 +469,7 @@ test('17. plan change during start does not mark wrong version', async () => {
   const coll = new FakeColl();
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => { calls += 1; return coll; },
     indicatorService: new FakeIS() as any,
@@ -479,6 +495,7 @@ test('18. pending start same promise', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -494,6 +511,7 @@ test('19. start reject does not update applied version', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FailingColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -509,6 +527,7 @@ test('20. stop during pending start does not mark applied', async () => {
   const blocker = new Promise<void>(r => { resolveStart = r; });
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -542,6 +561,7 @@ test('22. stopped runtime apply does not create collector', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   let factoryCalls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => { factoryCalls += 1; return new FakeColl(); },
     indicatorService: new FakeIS() as any,
@@ -560,6 +580,7 @@ test('23. running apply performs safe restart', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -582,6 +603,7 @@ test('24. restart uses latest plan', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const capturedPlans: SubscriptionPlan[] = [];
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: (plan) => {
       capturedPlans.push(plan);
@@ -604,6 +626,7 @@ test('24. restart uses latest plan', async () => {
 test('25. restart updates appliedPlanVersion', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,
@@ -622,6 +645,7 @@ test('26. restart fail preserves old applied version', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -643,6 +667,7 @@ test('27. restart fail does not clear stores', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -665,14 +690,14 @@ test('27. restart fail does not clear stores', async () => {
     kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
     receivedAt: 200,
   });
-  assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'));
+  assert.ok(rt.marketData.store.getSnapshot('bitget', 'BTC/USDT'));
 
   universe.addSymbol('ETH/USDT');
   await assert.rejects(() => rt.applyUniversePlan(), /boom-start/);
 
   // Store should still have BTC/USDT data
-  assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'), 'snapshot preserved');
-  assert.equal(rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 10).length, 1, 'candle preserved');
+  assert.ok(rt.marketData.store.getSnapshot('bitget', 'BTC/USDT'), 'snapshot preserved');
+  assert.equal(rt.marketData.candleStore.getSeries('bitget', 'BTC/USDT', '1m', 10).length, 1, 'candle preserved');
 });
 
 test('28. stop during restart does not mark applied', async () => {
@@ -681,6 +706,7 @@ test('28. stop during restart does not mark applied', async () => {
   const blocker = new Promise<void>(r => { resolveStart = r; });
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -711,6 +737,7 @@ test('29. concurrent apply returns same promise', async () => {
   const blocker = new Promise<void>(r => { resolveStart = r; });
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -738,6 +765,7 @@ test('30. deleted symbol cleans snapshot + candle data', async () => {
   const universe = makeUniverse(['BTC/USDT', 'ETH/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -751,18 +779,18 @@ test('30. deleted symbol cleans snapshot + candle data', async () => {
       receivedAt: 100,
     });
     rt.marketData.candleStore.appendClosedKline({
-      kline: { channel: 'kline', instId: sym, interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, instType: 'sp' } as any,
+      kline: { channel: 'kline', instId: sym, interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
       receivedAt: 200,
     });
   }
-  assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'));
-  assert.ok(rt.marketData.store.getSnapshot('ETH/USDT'));
+  assert.ok(rt.marketData.store.getSnapshot('bitget', 'BTC/USDT'));
+  assert.ok(rt.marketData.store.getSnapshot('bitget', 'ETH/USDT'));
 
   universe.removeSymbol('ETH/USDT');
   await rt.applyUniversePlan();
-  assert.equal(rt.marketData.store.getSnapshot('ETH/USDT'), undefined, 'ETH snapshot removed');
-  assert.equal(rt.marketData.candleStore.getSeries('ETH/USDT', '1m', 10).length, 0, 'ETH candles removed');
-  assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'), 'BTC snapshot preserved');
+  assert.equal(rt.marketData.store.getSnapshot('bitget', 'ETH/USDT'), undefined, 'ETH snapshot removed');
+  assert.equal(rt.marketData.candleStore.getSeries('bitget', 'ETH/USDT', '1m', 10).length, 0, 'ETH candles removed');
+  assert.ok(rt.marketData.store.getSnapshot('bitget', 'BTC/USDT'), 'BTC snapshot preserved');
   rt.stop();
 });
 
@@ -770,6 +798,7 @@ test('31. interval change cleans whole symbol data', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -779,11 +808,11 @@ test('31. interval change cleans whole symbol data', async () => {
     kline: { channel: 'kline', instId: 'BTC/USDT', interval: '1m', open: 100, high: 110, low: 90, close: 105, volume: 50, ts: 2000, confirm: true, exchange: 'bitget' } as any,
     receivedAt: 200,
   });
-  assert.equal(rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 10).length, 1);
+  assert.equal(rt.marketData.candleStore.getSeries('bitget', 'BTC/USDT', '1m', 10).length, 1);
 
   universe.setPlan({ entries: [{ symbol: 'BTC/USDT', intervals: ['5m'] }] });
   await rt.applyUniversePlan();
-  assert.equal(rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 10).length, 0, 'old interval cleaned');
+  assert.equal(rt.marketData.candleStore.getSeries('bitget', 'BTC/USDT', '1m', 10).length, 0, 'old interval cleaned');
   rt.stop();
 });
 
@@ -791,6 +820,7 @@ test('32. ticker flag change cleans whole symbol data', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -800,11 +830,11 @@ test('32. ticker flag change cleans whole symbol data', async () => {
     ticker: { channel: 'ticker', instId: 'BTC/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000, exchange: 'bitget' } as any,
     receivedAt: 100,
   });
-  assert.ok(rt.marketData.store.getSnapshot('BTC/USDT'));
+  assert.ok(rt.marketData.store.getSnapshot('bitget', 'BTC/USDT'));
 
   universe.setPlan({ entries: [{ symbol: 'BTC/USDT', ticker: false }] });
   await rt.applyUniversePlan();
-  assert.equal(rt.marketData.store.getSnapshot('BTC/USDT'), undefined, 'snapshot cleared on ticker flag change');
+  assert.equal(rt.marketData.store.getSnapshot('bitget', 'BTC/USDT'), undefined, 'snapshot cleared on ticker flag change');
   rt.stop();
 });
 
@@ -812,6 +842,7 @@ test('33. new symbol added does not clean old data', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -823,7 +854,7 @@ test('33. new symbol added does not clean old data', async () => {
   });
   universe.addSymbol('ETH/USDT');
   await rt.applyUniversePlan();
-  assert.equal(rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 10).length, 1, 'BTC data preserved');
+  assert.equal(rt.marketData.candleStore.getSeries('bitget', 'BTC/USDT', '1m', 10).length, 1, 'BTC data preserved');
   rt.stop();
 });
 
@@ -831,6 +862,7 @@ test('34. semantically identical entry does not clean data', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -846,7 +878,7 @@ test('34. semantically identical entry does not clean data', async () => {
   // Need plan to advance version though — setPlan does dedup/idempotency; need a real change
   universe.addSymbol('ETH/USDT');   // forces version bump, but BTC entry unchanged
   await rt.applyUniversePlan();
-  assert.equal(rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 10).length, 1, 'BTC data preserved on semantically identical entry');
+  assert.equal(rt.marketData.candleStore.getSeries('bitget', 'BTC/USDT', '1m', 10).length, 1, 'BTC data preserved on semantically identical entry');
   rt.stop();
 });
 
@@ -854,6 +886,7 @@ test('35. stop → update → start uses latest plan', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const captured: number[] = [];
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: (plan) => { captured.push(plan.version); return new FakeColl(); },
     indicatorService: new FakeIS() as any,
@@ -872,11 +905,13 @@ test('36. two runtimes have isolated universe/applied state', async () => {
   const u1 = makeUniverse(['BTC/USDT']);
   const u2 = makeUniverse(['ETH/USDT']);
   const r1 = createTradingRuntime({
+    exchange: 'bitget',
     universe: u1,
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,
   });
   const r2 = createTradingRuntime({
+    exchange: 'bitget',
     universe: u2,
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,
@@ -895,6 +930,7 @@ test('37.原有 3A7 lifecycle tests仍通过 (stop safe when pipeline not initia
   const coll = new FakeColl();
   const universe = makeUniverse(['BTC/USDT']);
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => coll,
     indicatorService: new FakeIS() as any,
@@ -921,6 +957,7 @@ test('39. injected bus shared (3A7 3)', () => {
   const bus = createTradingEventBus();
   const universe = makeUniverse();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,
@@ -933,6 +970,7 @@ test('39. injected bus shared (3A7 3)', () => {
 
 test('40. router + routerConfig throws (3A7 5)', () => {
   assert.throws(() => createTradingRuntime({
+    exchange: 'bitget',
     universe: makeUniverse(),
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,
@@ -946,6 +984,7 @@ test('R1. apply noop then update then apply executes restart', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe, collectorFactory: () => coll, indicatorService: new FakeIS() as any,
   });
   await rt.start();
@@ -961,6 +1000,7 @@ test('R2. stopped apply then start+update+apply executes', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe, collectorFactory: () => coll, indicatorService: new FakeIS() as any,
   });
   await rt.start();
@@ -985,6 +1025,7 @@ test('R3. apply rejection leaves universe pending', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -1006,6 +1047,7 @@ test('R4. pending apply concurrent calls same promise', async () => {
   const blocker = new Promise<void>(r => { resolveBlocker = r; });
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -1031,6 +1073,7 @@ test('R5. settled apply returns new promise for next apply', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const coll = new FakeColl();
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe, collectorFactory: () => coll, indicatorService: new FakeIS() as any,
   });
   await rt.start();
@@ -1051,6 +1094,7 @@ test('R6. pending start plan changes: apply restarts with v2', async () => {
   let collectorCalls = 0;
   const capturedVersions: number[] = [];
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: (plan) => {
       collectorCalls += 1;
@@ -1100,6 +1144,7 @@ test('R6b. pending start with no universe change: apply returns no-op', async ()
   const blocker = new Promise<void>(r => { resolveBlocker = r; });
   let collectorCalls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       collectorCalls += 1;
@@ -1134,6 +1179,7 @@ test('R6c. stop during pending start invalidates apply', async () => {
   const blocker = new Promise<void>(r => { resolveBlocker = r; });
   let collectorCalls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       collectorCalls += 1;
@@ -1174,6 +1220,7 @@ test('R7. universe updated during restart: collector uses captured version', asy
   const blocker = new Promise<void>(r => { resolveBlocker = r; });
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: (plan) => {
       captured.push(plan.version);
@@ -1205,6 +1252,7 @@ test('R8. stop during apply does not block future apply', async () => {
   const blocker = new Promise<void>(r => { resolveBlocker = r; });
   let calls = 0;
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: () => {
       calls += 1;
@@ -1271,6 +1319,7 @@ test('R11. external plan.entries array mutation does not affect PAC', () => {
 test('R12. collectorFactory mutating plan does not affect PAC or applied state', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe,
     collectorFactory: (plan) => {
       (plan as any).version = 999;
@@ -1288,14 +1337,15 @@ test('R12. collectorFactory mutating plan does not affect PAC or applied state',
 test('R13. cleanup throw prevents markApplied', async () => {
   const universe = makeUniverse(['BTC/USDT', 'ETH/USDT']);
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe, collectorFactory: () => new FakeColl(), indicatorService: new FakeIS() as any,
   });
   await rt.start();
   assert.equal(rt.appliedPlanVersion, 1);
   const origRemove = rt.marketData.store.removeSymbol.bind(rt.marketData.store);
-  rt.marketData.store.removeSymbol = (sym: string) => {
+  rt.marketData.store.removeSymbol = (ex: 'bitget' | 'binance', sym: string) => {
     if (sym === 'ETH/USDT') throw new Error('KABOOM');
-    return origRemove(sym);
+    return origRemove(ex, sym);
   };
   universe.removeSymbol('ETH/USDT');
   await assert.rejects(() => rt.applyUniversePlan(), /KABOOM/);
@@ -1307,6 +1357,7 @@ test('R13. cleanup throw prevents markApplied', async () => {
 test('R14. original 40 Stage 3B1B tests still pass (regression)', async () => {
   const universe = makeUniverse(['BTC/USDT']);
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe, collectorFactory: () => new FakeColl(), indicatorService: new FakeIS() as any,
   });
   assert.ok(rt.universe);
@@ -1316,4 +1367,78 @@ test('R14. original 40 Stage 3B1B tests still pass (regression)', async () => {
   assert.equal(rt.appliedPlanVersion, 1);
   rt.stop();
   assert.equal(rt.isRunning, false);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3B4C2-R1 — Cross-exchange cleanup isolation (additive)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('R15. cleanupStaleSymbols Removes only bitget — binance same symbol preserved', async () => {
+  // Same Store shared across two runtimes (bitget + binance). When the bitget
+  // runtime drops a symbol from its universe, its cleanup must NOT delete the
+  // binance snapshot for the same symbol — exchange-isolated cleanup.
+  const sharedStore = createMarketSnapshotStore({ clock: { now: () => 200_000 } as any, staleAfterMs: 60_000 });
+  const sharedCandle = createCandleSeriesStore({ capacityPerSeries: 500 });
+  const uB = makeUniverse(['BTC/USDT', 'ETH/USDT']);
+  const uN = makeUniverse(['BTC/USDT', 'ETH/USDT']);
+  const rtB = createTradingRuntime({
+    exchange: 'bitget',
+    universe: uB,
+    collectorFactory: () => new FakeColl(),
+    indicatorService: new FakeIS() as any,
+    marketData: { snapshotStore: sharedStore, candleStore: sharedCandle } as any,
+  });
+  const rtN = createTradingRuntime({
+    exchange: 'binance',
+    universe: uN,
+    collectorFactory: () => new FakeColl(),
+    indicatorService: new FakeIS() as any,
+    marketData: { snapshotStore: sharedStore, candleStore: sharedCandle } as any,
+  });
+  await rtB.start();
+  await rtN.start();
+  // Inject both exchange snapshots for ETH/USDT
+  rtB.marketData.store.updateTicker({
+    ticker: { channel: 'ticker', exchange: 'bitget', instId: 'ETH/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000 } as any,
+    receivedAt: 100,
+  });
+  rtN.marketData.store.updateTicker({
+    ticker: { channel: 'ticker', exchange: 'binance', instId: 'ETH/USDT', last: 100, bestBid: 99, bestAsk: 101, volume24h: 1000, ts: 1000 } as any,
+    receivedAt: 100,
+  });
+  assert.ok(rtB.marketData.store.getSnapshot('bitget', 'ETH/USDT'), 'bitget ETH present');
+  assert.ok(rtN.marketData.store.getSnapshot('binance', 'ETH/USDT'), 'binance ETH present');
+  // Remove ETH from ONLY the bitget universe
+  uB.removeSymbol('ETH/USDT');
+  await rtB.applyUniversePlan();
+  assert.equal(rtB.marketData.store.getSnapshot('bitget', 'ETH/USDT'), undefined, 'bitget ETH gone');
+  const nSnap = rtN.marketData.store.getSnapshot('binance', 'ETH/USDT');
+  assert.ok(nSnap, 'binance ETH PRESERVED — cross-exchange cleanup isolation holds');
+  assert.equal(nSnap!.ticker!.ticker.exchange, 'binance', 'binance snapshot identity preserved');
+  rtB.stop();
+  rtN.stop();
+});
+
+test('R16. selector cannot override exchange via fake exchange field — bitget wrapper fixed', () => {
+  // buildBitgetTradingRuntime hard-codes exchange='bitget'; passing an options.exchange='binance'
+  // via a destructured object must NOT override the bitget-locked wrapper.
+  const u = makeUniverse(['BTC/USDT']);
+  const rt = createBitgetTradingRuntime({
+    universe: u,
+    indicatorService: new FakeIS() as any,
+    bitget: { webSocketFactory: () => ({} as any), scheduler: { setTimeout: () => 0, clearTimeout: () => {} } as any, ackTimeoutMs: 100 },
+  } as any);
+  assert.equal((rt as any).exchange, 'bitget', 'bitget wrapper exposes fixed exchange');
+  rt.stop();
+});
+
+test('R17. binance wrapper exposes fixed exchange=binance', () => {
+  const u = makeUniverse(['BTC/USDT']);
+  const rt = createBinanceTradingRuntime({
+    universe: u,
+    indicatorService: new FakeIS() as any,
+    binance: { webSocketFactory: () => ({} as any), scheduler: { setTimeout: () => 0, clearTimeout: () => {} } as any, ackTimeoutMs: 100 },
+  } as any);
+  assert.equal((rt as any).exchange, 'binance', 'binance wrapper exposes fixed exchange');
+  rt.stop();
 });

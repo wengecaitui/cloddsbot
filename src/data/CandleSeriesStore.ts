@@ -1,47 +1,28 @@
-// Stage 3A4: CandleSeriesStore — bounded per-symbol+interval OHLCV history
+// Stage 3A4 + 3B4C2: CandleSeriesStore — exchange-isolated bounded OHLCV history
 //
 // Independent of MarketSnapshotStore (latest-state) and RingBuffer (generic).
 // Designed purely for indicator input: keeps last N confirmed closed klines
-// per (symbol, interval) in chronological order, oldest-first.
+// per (exchange, symbol, interval) in chronological order, oldest-first.
+//
+// Stage 3B4C2: All operations require exchange provenance. Internal key:
+//   `${sourceKey(exchange, symbol)}::${interval}`
+// Bitget BTC/USDT 1m and Binance BTC/USDT 1m use separate buffers.
 
+import type { ExchangeId } from './MarketIdentity';
+import { sourceKey } from './MarketIdentity';
 import type { WsKline, Series } from './types';
 
 export interface CandleSeriesStoreOptions {
-  /** Max candles retained per (symbol, interval). Default 500. Must be positive int. */
+  /** Max candles retained per (exchange, symbol, interval). Default 500. Must be positive int. */
   capacityPerSeries?: number;
 }
 
 export interface CandleSeriesStore {
-  /**
-   * Append a confirmed closed kline. Returns true if accepted.
-   * Rejects: confirm !== true, non-finite ts/receivedAt, older ts,
-   * or same ts with non-newer receivedAt. Same ts with newer receivedAt
-   * replaces the last entry WITHOUT growing the count.
-   */
   appendClosedKline(input: { kline: WsKline; receivedAt: number }): boolean;
-
-  /**
-   * Return the most recent `count` candles as Series[], ordered oldest → newest.
-   * Returns defensive copies. Never returns more than available.
-   */
-  getSeries(symbol: string, interval: string, count: number): Series[];
-
-  /** True iff at least `minimum` candles are stored for (symbol, interval). */
-  hasMinimumSeries(symbol: string, interval: string, minimum: number): boolean;
-
-  /**
-   * Stage 3B1A: Remove all candle series for `symbol` across every interval.
-   * Returns true if at least one series was removed, false if symbol had no series.
-   * Subsequent appends start from empty history (warm-up restart).
-   */
-  removeSymbol(symbol: string): boolean;
-
-  /**
-   * Stage 3B1A: Remove only the (symbol, interval) series.
-   * Returns true if removed, false if no such series existed.
-   * Does not affect other intervals for the same symbol.
-   */
-  removeInterval(symbol: string, interval: string): boolean;
+  getSeries(exchange: ExchangeId, symbol: string, interval: string, count: number): Series[];
+  hasMinimumSeries(exchange: ExchangeId, symbol: string, interval: string, minimum: number): boolean;
+  removeSymbol(exchange: ExchangeId, symbol: string): boolean;
+  removeInterval(exchange: ExchangeId, symbol: string, interval: string): boolean;
 }
 
 interface CandleEntry {
@@ -64,6 +45,12 @@ function toSeries(entry: CandleEntry): Series {
   };
 }
 
+const SEP = '::';
+
+function keyOf(exchange: ExchangeId, symbol: string, interval: string): string {
+  return `${sourceKey(exchange, symbol)}${SEP}${interval}`;
+}
+
 export function createCandleSeriesStore(
   options?: CandleSeriesStoreOptions,
 ): CandleSeriesStore {
@@ -74,12 +61,8 @@ export function createCandleSeriesStore(
 
   const buffers = new Map<string, CandleEntry[]>();
 
-  function keyOf(symbol: string, interval: string): string {
-    return `${symbol}::${interval}`;
-  }
-
-  function getOrInit(symbol: string, interval: string): CandleEntry[] {
-    const k = keyOf(symbol, interval);
+  function getOrInit(exchange: ExchangeId, symbol: string, interval: string): CandleEntry[] {
+    const k = keyOf(exchange, symbol, interval);
     let buf = buffers.get(k);
     if (!buf) {
       buf = [];
@@ -95,7 +78,11 @@ export function createCandleSeriesStore(
     if (!isFiniteNumber(kline.ts)) return false;
     if (!isFiniteNumber(receivedAt)) return false;
 
-    const buf = getOrInit(kline.instId, kline.interval);
+    const buf = getOrInit(
+      kline.exchange as ExchangeId,
+      kline.instId,
+      kline.interval,
+    );
 
     if (buf.length === 0) {
       buf.push({ kline: { ...kline }, receivedAt });
@@ -120,10 +107,10 @@ export function createCandleSeriesStore(
     return true;
   }
 
-  function getSeries(symbol: string, interval: string, count: number): Series[] {
+  function getSeries(exchange: ExchangeId, symbol: string, interval: string, count: number): Series[] {
     if (!Number.isInteger(count) || count <= 0) return [];
 
-    const buf = buffers.get(keyOf(symbol, interval));
+    const buf = buffers.get(keyOf(exchange, symbol, interval));
     if (!buf || buf.length === 0) return [];
 
     const take = Math.min(count, buf.length);
@@ -135,16 +122,17 @@ export function createCandleSeriesStore(
     return result;
   }
 
-  function hasMinimumSeries(symbol: string, interval: string, minimum: number): boolean {
+  function hasMinimumSeries(exchange: ExchangeId, symbol: string, interval: string, minimum: number): boolean {
     if (!Number.isInteger(minimum) || minimum <= 0) return false;
-    const buf = buffers.get(keyOf(symbol, interval));
+    const buf = buffers.get(keyOf(exchange, symbol, interval));
     return buf !== undefined && buf.length >= minimum;
   }
 
-  function removeSymbol(symbol: string): boolean {
+  function removeSymbol(exchange: ExchangeId, symbol: string): boolean {
     let removed = false;
-    for (const [k, _v] of buffers) {
-      if (k.startsWith(`${symbol}::`)) {
+    const prefix = `${sourceKey(exchange, symbol)}${SEP}`;
+    for (const [k] of buffers) {
+      if (k.startsWith(prefix)) {
         buffers.delete(k);
         removed = true;
       }
@@ -152,8 +140,8 @@ export function createCandleSeriesStore(
     return removed;
   }
 
-  function removeInterval(symbol: string, interval: string): boolean {
-    return buffers.delete(keyOf(symbol, interval));
+  function removeInterval(exchange: ExchangeId, symbol: string, interval: string): boolean {
+    return buffers.delete(keyOf(exchange, symbol, interval));
   }
 
   return {
@@ -162,5 +150,5 @@ export function createCandleSeriesStore(
     hasMinimumSeries,
     removeSymbol,
     removeInterval,
-  };
+  } satisfies CandleSeriesStore;
 }

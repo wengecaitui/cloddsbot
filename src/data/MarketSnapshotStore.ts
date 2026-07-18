@@ -1,6 +1,13 @@
-// Stage 3A2: MarketSnapshotStore — in-memory per-symbol snapshot store
+// Stage 3A2 + 3B4C2: MarketSnapshotStore — exchange-isolated in-memory snapshot store
 // Singleton-free. Clock injected. Defensive copy on write and read.
+//
+// Stage 3B4C2: All operations require exchange provenance. Internal Map keys
+// use sourceKey(exchange, canonicalSymbol). Two exchanges reading the same
+// canonical symbol (e.g. bitget:BTC/USDT vs binance:BTC/USDT) have independent
+// ticker state, kline state, version, staleness, and lastUpdatedAt.
 
+import type { ExchangeId } from './MarketIdentity';
+import { sourceKey, isExchangeId } from './MarketIdentity';
 import type { WsTicker, WsKline } from './types';
 import type {
   Clock,
@@ -17,9 +24,11 @@ export interface MarketSnapshotStoreOptions {
   staleAfterMs?: number;
 }
 
-// ── Internal symbol state ───────────────────────────────────────────────────
+// ── Internal symbol state (exchange-aware) ──────────────────────────────────
 
 interface SymbolState {
+  readonly exchange: ExchangeId;
+  readonly symbol: string; // canonical
   ticker: ReceivedTicker | null;
   klines: Record<string, ReceivedClosedKline>;
   version: number;
@@ -46,7 +55,7 @@ function deepCloneKline(input: { kline: WsKline; receivedAt: number }): Received
   };
 }
 
-function cloneSnapshot(s: SymbolState, clock: Clock, staleAfterMs: number, symbol: string): MarketSnapshot {
+function cloneSnapshot(s: SymbolState, clock: Clock, staleAfterMs: number): MarketSnapshot {
   const now = clock.now();
   const ageMs = Math.max(0, now - s.lastUpdatedAt);
 
@@ -63,7 +72,8 @@ function cloneSnapshot(s: SymbolState, clock: Clock, staleAfterMs: number, symbo
   }
 
   return {
-    symbol,
+    exchange: s.exchange,
+    symbol: s.symbol,
     ticker: tickerCopy,
     klines: klinesCopy,
     snapshotVersion: s.version,
@@ -90,11 +100,12 @@ export function createMarketSnapshotStore(
 
   // ── Internal read/create ─────────────────────────────────────────────────
 
-  function getOrInit(symbol: string): SymbolState {
-    let s = states.get(symbol);
+  function getOrInit(exchange: ExchangeId, symbol: string): SymbolState {
+    const key = sourceKey(exchange, symbol);
+    let s = states.get(key);
     if (!s) {
-      s = { ticker: null, klines: {}, version: 0, lastUpdatedAt: 0 };
-      states.set(symbol, s);
+      s = { exchange, symbol, ticker: null, klines: {}, version: 0, lastUpdatedAt: 0 };
+      states.set(key, s);
     }
     return s;
   }
@@ -107,6 +118,12 @@ export function createMarketSnapshotStore(
   }): MarketSnapshot {
     const { ticker, receivedAt } = input;
 
+    if (!isExchangeId(ticker.exchange)) {
+      throw new Error(`MarketSnapshotStore: invalid ticker.exchange: ${JSON.stringify(ticker.exchange)}`);
+    }
+    if (typeof ticker.instId !== 'string' || ticker.instId.length === 0) {
+      throw new Error('MarketSnapshotStore: ticker.instId must be a non-empty string');
+    }
     if (ticker.channel !== 'ticker') {
       throw new Error(`MarketSnapshotStore: expected ticker.channel='ticker', got '${ticker.channel}'`);
     }
@@ -117,12 +134,13 @@ export function createMarketSnapshotStore(
       throw new Error(`MarketSnapshotStore: receivedAt must be finite, got ${receivedAt}`);
     }
 
+    const exchange = ticker.exchange as ExchangeId;
     const symbol = ticker.instId;
-    const state = getOrInit(symbol);
+    const state = getOrInit(exchange, symbol);
 
     // Reject if source ts is strictly older
     if (state.ticker !== null && ticker.ts < state.ticker.ticker.ts) {
-      return cloneSnapshot(state, clock, staleAfterMs, symbol);
+      return cloneSnapshot(state, clock, staleAfterMs);
     }
 
     // Reject if same source ts but same or older receivedAt
@@ -131,7 +149,7 @@ export function createMarketSnapshotStore(
       ticker.ts === state.ticker.ticker.ts &&
       receivedAt <= state.ticker.receivedAt
     ) {
-      return cloneSnapshot(state, clock, staleAfterMs, symbol);
+      return cloneSnapshot(state, clock, staleAfterMs);
     }
 
     // Accept
@@ -139,7 +157,7 @@ export function createMarketSnapshotStore(
     state.version += 1;
     state.lastUpdatedAt = Math.max(state.lastUpdatedAt, receivedAt);
 
-    return cloneSnapshot(state, clock, staleAfterMs, symbol);
+    return cloneSnapshot(state, clock, staleAfterMs);
   }
 
   // ── Kline update ─────────────────────────────────────────────────────────
@@ -150,13 +168,17 @@ export function createMarketSnapshotStore(
   }): MarketSnapshot {
     const { kline, receivedAt } = input;
 
+    if (!isExchangeId(kline.exchange)) {
+      throw new Error(`MarketSnapshotStore: invalid kline.exchange: ${JSON.stringify(kline.exchange)}`);
+    }
+    if (typeof kline.instId !== 'string' || kline.instId.length === 0) {
+      throw new Error('MarketSnapshotStore: kline.instId must be a non-empty string');
+    }
     if (kline.channel !== 'kline') {
       throw new Error(`MarketSnapshotStore: expected kline.channel='kline', got '${kline.channel}'`);
     }
     if (kline.confirm !== true) {
-      throw new Error(
-        `MarketSnapshotStore: kline.confirm must be true, got ${kline.confirm}`,
-      );
+      throw new Error(`MarketSnapshotStore: kline.confirm must be true, got ${kline.confirm}`);
     }
     if (!isFiniteNumber(kline.ts)) {
       throw new Error(`MarketSnapshotStore: kline.ts must be finite, got ${kline.ts}`);
@@ -165,14 +187,15 @@ export function createMarketSnapshotStore(
       throw new Error(`MarketSnapshotStore: receivedAt must be finite, got ${receivedAt}`);
     }
 
+    const exchange = kline.exchange as ExchangeId;
     const symbol = kline.instId;
-    const state = getOrInit(symbol);
+    const state = getOrInit(exchange, symbol);
     const interval = kline.interval;
     const existing = state.klines[interval];
 
     // Reject if source ts is strictly older (per-interval)
     if (existing !== undefined && kline.ts < existing.kline.ts) {
-      return cloneSnapshot(state, clock, staleAfterMs, symbol);
+      return cloneSnapshot(state, clock, staleAfterMs);
     }
 
     // Reject if same source ts but same or older receivedAt
@@ -181,7 +204,7 @@ export function createMarketSnapshotStore(
       kline.ts === existing.kline.ts &&
       receivedAt <= existing.receivedAt
     ) {
-      return cloneSnapshot(state, clock, staleAfterMs, symbol);
+      return cloneSnapshot(state, clock, staleAfterMs);
     }
 
     // Accept
@@ -189,34 +212,36 @@ export function createMarketSnapshotStore(
     state.version += 1;
     state.lastUpdatedAt = Math.max(state.lastUpdatedAt, receivedAt);
 
-    return cloneSnapshot(state, clock, staleAfterMs, symbol);
+    return cloneSnapshot(state, clock, staleAfterMs);
   }
 
   // ── Read ─────────────────────────────────────────────────────────────────
 
-  function getSnapshot(symbol: string): MarketSnapshot | undefined {
-    const state = states.get(symbol);
+  function getSnapshot(exchange: ExchangeId, symbol: string): MarketSnapshot | undefined {
+    const key = sourceKey(exchange, symbol);
+    const state = states.get(key);
     if (!state) return undefined;
-    return cloneSnapshot(state, clock, staleAfterMs, symbol);
+    return cloneSnapshot(state, clock, staleAfterMs);
   }
 
   function getAllSnapshots(): MarketSnapshot[] {
     const result: MarketSnapshot[] = [];
-    for (const [symbol, state] of states) {
-      result.push(cloneSnapshot(state, clock, staleAfterMs, symbol));
+    for (const [, state] of states) {
+      result.push(cloneSnapshot(state, clock, staleAfterMs));
     }
     return result;
   }
 
-  function removeSymbol(symbol: string): boolean {
-    return states.delete(symbol);
+  function removeSymbol(exchange: ExchangeId, symbol: string): boolean {
+    const key = sourceKey(exchange, symbol);
+    return states.delete(key);
   }
 
   return {
     updateTicker,
     updateClosedKline,
-    getSnapshot,
     getAllSnapshots,
+    getSnapshot,
     removeSymbol,
-  };
+  } satisfies MarketSnapshotStore;
 }

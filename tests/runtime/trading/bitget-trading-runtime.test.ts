@@ -796,6 +796,7 @@ test('28. createTradingRuntime with fake collector still works', () => {
     onKline() {}
   }
   const rt = createTradingRuntime({
+    exchange: 'bitget',
     universe: um,
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,

@@ -5,6 +5,8 @@
 import type { Clock } from '../../data/MarketSnapshot';
 import type { CandleSeriesStore } from '../../data/CandleSeriesStore';
 import { createCandleSeriesStore } from '../../data/CandleSeriesStore';
+import type { ExchangeId } from '../../data/MarketIdentity';
+import { isExchangeId } from '../../data/MarketIdentity';
 import type { TradingEventBus } from '../../events';
 import { createTradingEventBus } from '../../events';
 import { KillSwitch } from '../../router/KillSwitch';
@@ -19,24 +21,26 @@ import type { UniverseManager, SubscriptionPlan, SubscriptionEntry } from '../ma
 import { createPlanAwareCollector } from './PlanAwareCollector';
 
 export interface TradingRuntimeOptions {
-  universe: UniverseManager;
-  collectorFactory: (plan: SubscriptionPlan) => MarketDataCollectorPort;
-  indicatorService: IndicatorService;
-  bus?: TradingEventBus;
-  clock?: Clock;
-  router?: ExecutionRouter;
-  routerConfig?: {
+  /** Stage 3B4C2: exchange this runtime is bound to. Required, validated at construction. */
+  readonly exchange: ExchangeId;
+  readonly universe: UniverseManager;
+  readonly collectorFactory: (plan: SubscriptionPlan) => MarketDataCollectorPort;
+  readonly indicatorService: IndicatorService;
+  readonly bus?: TradingEventBus;
+  readonly clock?: Clock;
+  readonly router?: ExecutionRouter;
+  readonly routerConfig?: {
     fastPathTimeoutSec?: number;
     maxBiasReportAgeHours?: number;
     killSwitch?: KillSwitch;
   };
-  candleCapacity?: number;
-  staleAfterMs?: number;
-  marketDataInterval?: string;
-  minimumSeries?: number;
-  seriesLimit?: number;
-  maxKlineAgeMs?: number;
-  slowPipelineConfig?: Pick<SlowPipelineConfig, 'model' | 'adapterScript' | 'timeoutMs' | 'adapterFactory'>;
+  readonly candleCapacity?: number;
+  readonly staleAfterMs?: number;
+  readonly marketDataInterval?: string;
+  readonly minimumSeries?: number;
+  readonly seriesLimit?: number;
+  readonly maxKlineAgeMs?: number;
+  readonly slowPipelineConfig?: Pick<SlowPipelineConfig, 'model' | 'adapterScript' | 'timeoutMs' | 'adapterFactory'>;
 }
 
 export interface UniverseApplyResult {
@@ -47,6 +51,8 @@ export interface UniverseApplyResult {
 }
 
 export interface TradingRuntime {
+  /** Stage 3B4C2: the exchange this runtime is bound to. */
+  readonly exchange: ExchangeId;
   readonly bus: TradingEventBus;
   readonly router: ExecutionRouter;
   readonly marketData: MarketDataRuntime;
@@ -124,6 +130,12 @@ function computeStaleSymbols(prev: PlanSnapshot | null, next: PlanSnapshot): str
 }
 
 export function createTradingRuntime(options: TradingRuntimeOptions): TradingRuntime {
+  // Stage 3B4C2: validate exchange provenance at construction — fail fast.
+  if (!isExchangeId(options.exchange)) {
+    throw new Error(`TradingRuntime: options.exchange must be a valid ExchangeId, got ${JSON.stringify(options.exchange)}`);
+  }
+  const exchange: ExchangeId = options.exchange;
+
   if (options.router && options.routerConfig) {
     throw new Error('TradingRuntime: cannot provide both router and routerConfig');
   }
@@ -203,6 +215,8 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
     router: router as any,
     indicatorService: options.indicatorService,
     marketData: {
+      // Stage 3B4C2: bind this pipeline to the runtime's exchange — no fallback.
+      exchange,
       snapshotStore: marketData.store,
       candleStore: marketData.candleStore,
       interval, minimumSeries, seriesLimit, maxKlineAgeMs,
@@ -221,11 +235,13 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
 
   // Store cleanup: do NOT swallow errors. Callers must propagate so that
   // appliedPlanVersion and markApplied stay consistent on cleanup failure.
+  // Stage 3B4C2: scope deletion to this runtime's exchange only — never touch
+  // another exchange's snapshot/candle state.
   function cleanupStaleSymbols(prevSnap: PlanSnapshot | null, nextSnap: PlanSnapshot): void {
     const stale = computeStaleSymbols(prevSnap, nextSnap);
     for (const sym of stale) {
-      marketData.store.removeSymbol(sym);
-      marketData.candleStore.removeSymbol(sym);
+      marketData.store.removeSymbol(exchange, sym);
+      marketData.candleStore.removeSymbol(exchange, sym);
     }
   }
 
@@ -242,6 +258,7 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
   }
 
   return {
+    get exchange() { return exchange; },
     get bus() { return bus; },
     get router() { return router; },
     get marketData() { return marketData; },

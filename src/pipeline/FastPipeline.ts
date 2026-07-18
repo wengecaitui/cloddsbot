@@ -25,11 +25,15 @@ import { evaluate as decisionEngineEvaluate } from './DecisionEngine';
 import type { EngineInput } from './DecisionEngine';
 import type { MarketSnapshotStore } from '../data/MarketSnapshot';
 import type { CandleSeriesStore } from '../data/CandleSeriesStore';
+import type { ExchangeId } from '../data/MarketIdentity';
+import { isExchangeId } from '../data/MarketIdentity';
 import type { Series } from '../data/types';
 
 export interface FastPipelineMarketData {
-  snapshotStore: MarketSnapshotStore;
-  candleStore: CandleSeriesStore;
+  /** Stage 3B4C2: exchange this pipeline is bound to (no fallback to other exchanges). */
+  readonly exchange: ExchangeId;
+  readonly snapshotStore: MarketSnapshotStore;
+  readonly candleStore: CandleSeriesStore;
   /** 目标 K 线周期（默认 1m） */
   interval?: string;
   /** warm-up 最低 K 线数（默认 100） */
@@ -77,6 +81,10 @@ export class FastPipeline extends EventEmitter {
     // Stage 3A5: validate marketData config at construction time
     if (config.marketData) {
       const md = config.marketData;
+      // Stage 3B4C2: exchange must be a valid ExchangeId — fail fast at construction.
+      if (!isExchangeId(md.exchange)) {
+        throw new Error(`FastPipeline: marketData.exchange must be a valid ExchangeId, got ${JSON.stringify(md.exchange)}`);
+      }
       if (!md.interval || typeof md.interval !== 'string') {
         throw new Error('FastPipeline: marketData.interval must be a non-empty string');
       }
@@ -183,14 +191,16 @@ export class FastPipeline extends EventEmitter {
       const minimumSeries = md.minimumSeries ?? 100;
       const seriesLimit = md.seriesLimit ?? 200;
       const maxKlineAgeMs = md.maxKlineAgeMs ?? 120_000;
+      const exchange = md.exchange;
+      const symKey = `${exchange}:${signal.symbol}`;
 
-      // 4a. Snapshot 必须存在
-      const snapshot = md.snapshotStore.getSnapshot(signal.symbol);
+      // 4a. Snapshot 必须存在 (exchange-isolated, no fallback)
+      const snapshot = md.snapshotStore.getSnapshot(exchange, signal.symbol);
       if (!snapshot) {
         return {
           decision: 'skip',
           symbol: signal.symbol,
-          reason: `[MD] no snapshot for ${signal.symbol} — wait for market data`,
+          reason: `[MD] no snapshot for ${symKey} — wait for market data`,
           elapsedMs: Date.now() - startTime,
           biasReport,
         };
@@ -201,7 +211,7 @@ export class FastPipeline extends EventEmitter {
         return {
           decision: 'defense',
           symbol: signal.symbol,
-          reason: `[MD] snapshot stale (${snapshot.ageMs}ms) for ${signal.symbol}`,
+          reason: `[MD] snapshot stale (${snapshot.ageMs}ms) for ${symKey}`,
           elapsedMs: Date.now() - startTime,
           biasReport,
         };
@@ -213,7 +223,7 @@ export class FastPipeline extends EventEmitter {
         return {
           decision: 'skip',
           symbol: signal.symbol,
-          reason: `[MD] snapshot missing ${interval} kline for ${signal.symbol}`,
+          reason: `[MD] snapshot missing ${interval} kline for ${symKey}`,
           elapsedMs: Date.now() - startTime,
           biasReport,
         };
@@ -225,26 +235,26 @@ export class FastPipeline extends EventEmitter {
         return {
           decision: 'defense',
           symbol: signal.symbol,
-          reason: `[MD] ${interval} kline stale (${klineAgeMs}ms > ${maxKlineAgeMs}ms) for ${signal.symbol}`,
+          reason: `[MD] ${interval} kline stale (${klineAgeMs}ms > ${maxKlineAgeMs}ms) for ${symKey}`,
           elapsedMs: Date.now() - startTime,
           biasReport,
         };
       }
 
-      // 4e. CandleSeries warm-up 不足
-      if (!md.candleStore.hasMinimumSeries(signal.symbol, interval, minimumSeries)) {
-        const available = md.candleStore.getSeries(signal.symbol, interval, seriesLimit).length;
+      // 4e. CandleSeries warm-up 不足 (exchange-isolated, no fallback)
+      if (!md.candleStore.hasMinimumSeries(exchange, signal.symbol, interval, minimumSeries)) {
+        const available = md.candleStore.getSeries(exchange, signal.symbol, interval, seriesLimit).length;
         return {
           decision: 'skip',
           symbol: signal.symbol,
-          reason: `[MD] insufficient candle history for ${signal.symbol} ${interval}: ${available}/${minimumSeries}`,
+          reason: `[MD] insufficient candle history for ${symKey} ${interval}: ${available}/${minimumSeries}`,
           elapsedMs: Date.now() - startTime,
           biasReport,
         };
       }
 
-      // 4f. 读取旧→新序列
-      const pulled = md.candleStore.getSeries(signal.symbol, interval, seriesLimit);
+      // 4f. 读取旧→新序列 (exchange-isolated)
+      const pulled = md.candleStore.getSeries(exchange, signal.symbol, interval, seriesLimit);
       series = pulled;
 
       // 4g. Snapshot 与 CandleSeries 不同步（最后一根 ts 必须一致）
@@ -253,7 +263,7 @@ export class FastPipeline extends EventEmitter {
         return {
           decision: 'skip',
           symbol: signal.symbol,
-          reason: `[MD] snapshot/candle desync for ${signal.symbol} ${interval}: snapshotTs=${targetKline.kline.ts} candleTs=${lastTs ?? 'none'}`,
+          reason: `[MD] snapshot/candle desync for ${symKey} ${interval}: snapshotTs=${targetKline.kline.ts} candleTs=${lastTs ?? 'none'}`,
           elapsedMs: Date.now() - startTime,
           biasReport,
         };

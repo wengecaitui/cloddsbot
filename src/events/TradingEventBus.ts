@@ -1,6 +1,20 @@
-// Stage 3A1-R2: TradingEventBus — typed pub/sub, strict invariants
+// Stage 3A1-R2 + 3B4C2: TradingEventBus — typed pub/sub, strict invariants
+// Stage 3B4C2: publish boundary validates exchange provenance.
+//   - market.ticker.updated: requires ticker + isExchangeId(ticker.exchange).
+//   - market.kline.closed:  requires kline + isExchangeId(kline.exchange) + confirm === true.
+//   Invalid exchange is rejected synchronously (never reaches subscribers).
+//   No separate `source` field — exchange travels on ticker/kline itself.
 import { KlineClosedEventRejectedError } from './TradingEvent';
 import type { TradingEventType, TradingEventPayloadMap, TradingEvent } from './TradingEvent';
+import { isExchangeId } from '../data/MarketIdentity';
+
+export class InvalidExchangeProvenanceError extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = 'InvalidExchangeProvenanceError';
+    Object.setPrototypeOf(this, InvalidExchangeProvenanceError.prototype);
+  }
+}
 
 export interface TradingEventBus {
   subscribe<T extends TradingEventType>(
@@ -32,9 +46,28 @@ export function createTradingEventBus(): TradingEventBus {
     },
 
     publish(type, payload) {
-      if (type === 'market.kline.closed') {
-        const k = (payload as TradingEventPayloadMap['market.kline.closed']).kline;
-        if (!k || k.confirm !== true) {
+      // Stage 3B4C2: validate exchange provenance at the publish boundary.
+      if (type === 'market.ticker.updated') {
+        const p = payload as TradingEventPayloadMap['market.ticker.updated'];
+        if (!p || !p.ticker) {
+          throw new InvalidExchangeProvenanceError('market.ticker.updated requires ticker payload');
+        }
+        if (!isExchangeId((p.ticker as { exchange?: unknown }).exchange)) {
+          throw new InvalidExchangeProvenanceError(
+            `market.ticker.updated: invalid ticker.exchange: ${JSON.stringify((p.ticker as { exchange?: unknown }).exchange)}`,
+          );
+        }
+      } else if (type === 'market.kline.closed') {
+        const p = payload as TradingEventPayloadMap['market.kline.closed'];
+        if (!p || !p.kline) {
+          throw new KlineClosedEventRejectedError('market.kline.closed requires kline payload');
+        }
+        if (!isExchangeId((p.kline as { exchange?: unknown }).exchange)) {
+          throw new InvalidExchangeProvenanceError(
+            `market.kline.closed: invalid kline.exchange: ${JSON.stringify((p.kline as { exchange?: unknown }).exchange)}`,
+          );
+        }
+        if (p.kline.confirm !== true) {
           throw new KlineClosedEventRejectedError();
         }
       }

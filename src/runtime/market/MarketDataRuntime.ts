@@ -1,12 +1,18 @@
-// Stage 3A3: MarketDataRuntime — ticker + kline data composition
+// Stage 3A3 + 3A5 + 3B4C2: MarketDataRuntime — ticker + kline data composition
 // Stage 3A5: project confirmed kline into CandleSeriesStore as well
+// Stage 3B4C2: exchange provenance flows from collector → bus → store unchanged.
+//   - Collector emits ticker/kline with exchange already stamped.
+//   - EventBus validates exchange at publish boundary (rejects invalid).
+//   - Store subscribers write using the event's own ticker.exchange/kline.exchange.
+//   - No fetching, defaulting, or override of exchange at any layer.
 import type { WsTicker, WsKline } from '../../data/types';
 import type { Clock } from '../../data/MarketSnapshot';
 import type { MarketSnapshotStore } from '../../data/MarketSnapshot';
 import type { CandleSeriesStore } from '../../data/CandleSeriesStore';
+import type { ExchangeId } from '../../data/MarketIdentity';
 import type { TradingEventBus } from '../../events';
 import type { TradingEventPayloadMap } from '../../events';
-import { createTradingEventBus, KlineClosedEventRejectedError } from '../../events';
+import { createTradingEventBus, KlineClosedEventRejectedError, InvalidExchangeProvenanceError } from '../../events';
 import { createMarketSnapshotStore } from '../../data/MarketSnapshotStore';
 import { createCandleSeriesStore } from '../../data/CandleSeriesStore';
 
@@ -21,6 +27,7 @@ export interface MarketDataRuntimeFailure {
   readonly source: 'collector_start' | 'collector_callback' | 'bus_publish' | 'store_subscriber';
   readonly error: unknown;
   readonly symbol?: string;
+  readonly exchange?: ExchangeId;
 }
 
 export interface MarketDataRuntime {
@@ -58,7 +65,7 @@ export function createMarketDataRuntime(
   const candleStore: CandleSeriesStore = options.candleStore ?? createCandleSeriesStore();
   const onError = options.onError;
 
-  // — Internal state ------------------------------------------------
+  // — Internal state --------------------------------------------------------
 
   let startPromise: Promise<void> | null = null;
   let running = false;
@@ -68,25 +75,56 @@ export function createMarketDataRuntime(
   let unsubStoreKline: (() => void) | null = null;
   let cycleToken = 0;
 
-  // — Safe error reporting ------------------------------------------
+  // — Safe error reporting --------------------------------------------------
 
   function safeReport(failure: MarketDataRuntimeFailure): void {
     try { onError?.(failure); } catch { /* never bubble */ }
   }
 
-  // — Store subscriber lifecycle ------------------------------------
+  // — Store subscriber lifecycle --------------------------------------------
 
   function subscribeStore(): void {
     if (unsubStoreTicker !== null || unsubStoreKline !== null) return;
     const unsubTicker = bus.subscribe('market.ticker.updated', (event) => {
-      store.updateTicker({ ticker: event.ticker, receivedAt: event.receivedAt });
+      // Stage 3B4C2: event.ticker.exchange has already been validated by bus.publish;
+      // Store write uses event.ticker.exchange + event.ticker.instId (canonical).
+      try {
+        store.updateTicker({ ticker: event.ticker, receivedAt: event.receivedAt });
+      } catch (err) {
+        safeReport({
+          source: 'store_subscriber',
+          error: err,
+          symbol: event.ticker.instId,
+          exchange: event.ticker.exchange,
+        });
+      }
     });
     unsubStoreTicker = unsubTicker;
     try {
       unsubStoreKline = bus.subscribe('market.kline.closed', (event) => {
         // Stage 3A5: dual projection into snapshot + candle series
-        store.updateClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
-        candleStore.appendClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
+        // Stage 3B4C2: event.kline.exchange validated by bus.publish; both stores
+        // take exchange + canonical instId from the event itself.
+        try {
+          store.updateClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
+        } catch (err) {
+          safeReport({
+            source: 'store_subscriber',
+            error: err,
+            symbol: event.kline.instId,
+            exchange: event.kline.exchange,
+          });
+        }
+        try {
+          candleStore.appendClosedKline({ kline: event.kline, receivedAt: event.receivedAt });
+        } catch (err) {
+          safeReport({
+            source: 'store_subscriber',
+            error: err,
+            symbol: event.kline.instId,
+            exchange: event.kline.exchange,
+          });
+        }
       });
     } catch (err) {
       unsubStoreTicker = null;
@@ -104,7 +142,7 @@ export function createMarketDataRuntime(
     if (k) { try { k(); } catch (e) { safeReport({ source: 'store_subscriber', error: e }); } }
   }
 
-  // — Factory -------------------------------------------------------
+  // — Factory ---------------------------------------------------------------
 
   return {
     get bus(): TradingEventBus { return bus; },
@@ -134,9 +172,15 @@ export function createMarketDataRuntime(
               source: 'store_subscriber',
               error: new Error(`${result.failures} ticker subscriber(s) failed`),
               symbol: ticker.instId,
+              exchange: ticker.exchange,
             });
           } catch (err) {
-            safeReport({ source: 'bus_publish', error: err, symbol: ticker.instId });
+            safeReport({
+              source: 'bus_publish',
+              error: err,
+              symbol: ticker.instId,
+              exchange: ticker.exchange,
+            });
           }
         });
 
@@ -146,11 +190,14 @@ export function createMarketDataRuntime(
           try {
             const receivedAt = clock.now();
             bus.publish('market.kline.closed', { kline, receivedAt });
-          } catch (err) {
+          } catch (err: unknown) {
             safeReport({
               source: 'bus_publish',
-              error: err instanceof KlineClosedEventRejectedError ? err.message : err,
+              error: err instanceof KlineClosedEventRejectedError || err instanceof InvalidExchangeProvenanceError
+                ? err.message
+                : err,
               symbol: kline.instId,
+              exchange: kline.exchange,
             });
           }
         });

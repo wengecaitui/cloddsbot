@@ -26,11 +26,11 @@ import {
 
 export type ExchangeTradingRuntimeOptions = {
   exchange: 'bitget';
-  runtime: Omit<TradingRuntimeOptions, 'collectorFactory'>;
+  runtime: Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'>;
   provider?: BitgetMarketDataProviderOptions;
 } | {
   exchange: 'binance';
-  runtime: Omit<TradingRuntimeOptions, 'collectorFactory'>;
+  runtime: Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'>;
   provider?: BinanceMarketDataProviderOptions;
 };
 
@@ -55,6 +55,7 @@ export function createExchangeTradingRuntime(
       const provider = createBitgetMarketDataProvider(options.provider ?? {});
       return createTradingRuntime({
         ...options.runtime,
+        exchange: 'bitget',
         collectorFactory: (plan) => provider.createCollector(plan),
       });
     }
@@ -62,6 +63,7 @@ export function createExchangeTradingRuntime(
       const provider = createBinanceMarketDataProvider(options.provider ?? {});
       return createTradingRuntime({
         ...options.runtime,
+        exchange: 'binance',
         collectorFactory: (plan) => provider.createCollector(plan),
       });
     }

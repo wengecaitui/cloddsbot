@@ -50,7 +50,7 @@ export interface BitgetTradingRuntimeCollectorFailure
  * (re)start.
  */
 export interface BitgetTradingRuntimeOptions
-  extends Omit<TradingRuntimeOptions, 'collectorFactory'> {
+  extends Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'> {
 
   /**
    * Bitget V2 Collector tuning. All fields optional except `plan` which is
@@ -113,11 +113,13 @@ export function createBitgetTradingRuntime(
   };
   const provider = createBitgetMarketDataProvider(providerOptions);
 
-  // Pure TradingRuntimeOptions without bitget / onBitgetCollectorError.
-  const runtimeOptions: Omit<TradingRuntimeOptions, 'collectorFactory'> = tradingOptions;
+  // Pure TradingRuntimeOptions without bitget / onBitgetCollectorError / exchange.
+  // exchange is injected internally — caller MUST NOT provide it.
+  const runtimeOptions: Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'> = tradingOptions;
 
   return createTradingRuntime({
     ...runtimeOptions,
+    exchange: 'bitget',
     collectorFactory: (plan) => provider.createCollector(plan),
   });
 }

@@ -45,7 +45,7 @@ export interface BinanceTradingRuntimeCollectorFailure
  * (re)start.
  */
 export interface BinanceTradingRuntimeOptions
-  extends Omit<TradingRuntimeOptions, 'collectorFactory'> {
+  extends Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'> {
 
   /**
    * Binance V2 Collector tuning. All fields optional except `plan` which is
@@ -94,10 +94,11 @@ export function createBinanceTradingRuntime(
   };
   const provider = createBinanceMarketDataProvider(providerOptions);
 
-  const runtimeOptions: Omit<TradingRuntimeOptions, 'collectorFactory'> = tradingOptions;
+  const runtimeOptions: Omit<TradingRuntimeOptions, 'collectorFactory' | 'exchange'> = tradingOptions;
 
   return createTradingRuntime({
     ...runtimeOptions,
+    exchange: 'binance',
     collectorFactory: (plan) => provider.createCollector(plan),
   });
 }

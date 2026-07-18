@@ -46,13 +46,13 @@ class FakeCollector implements MarketDataCollectorPort {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 const TICKER: WsTicker = {
-  channel: 'ticker', instId: 'BTCUSDT',
+  channel: 'ticker', exchange: 'bitget', instId: 'BTCUSDT',
   last: 67000, bestBid: 66990, bestAsk: 67010,
   volume24h: 10000, high24h: 68000, low24h: 66000, ts: 5000,
 };
 
 const KLINE_CLOSED: WsKline = {
-  channel: 'kline', instId: 'BTCUSDT', interval: '1m',
+  channel: 'kline', exchange: 'bitget', instId: 'BTCUSDT', interval: '1m',
   open: 66900, high: 67100, low: 66800, close: 67000,
   volume: 100, ts: 5000, confirm: true,
 };
@@ -86,7 +86,7 @@ test('1. start wires ticker to store via bus', async () => {
 
   collector.emitTicker(TICKER);
 
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap.ticker !== null);
   assert.equal(snap.ticker!.ticker.last, 67000);
   assert.equal(snap.ticker!.receivedAt, clock.now());
@@ -100,7 +100,7 @@ test('2. start wires confirmed kline to store', async () => {
 
   collector.emitKline(KLINE_CLOSED);
 
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap.klines['1m'] !== undefined);
   assert.equal(snap.klines['1m'].kline.close, 67000);
 });
@@ -113,7 +113,7 @@ test('3. unconfirmed kline filtered before bus publish', async () => {
 
   collector.emitKline(KLINE_UNCONFIRMED);
 
-  const snap = runtime.store.getSnapshot('BTCUSDT');
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT');
   assert.equal(snap, undefined);
 });
 
@@ -127,7 +127,7 @@ test('4. receivedAt injected by runtime via clock', async () => {
 
   collector.emitTicker({ ...TICKER, ts: 100 });
 
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.equal(snap.ticker!.receivedAt, 42_000);
 });
 
@@ -179,7 +179,7 @@ test('8. stop invalidates late ticker callback (no store mutation)', async () =>
 
   collector.emitTicker(TICKER);
 
-  const snap = runtime.store.getSnapshot('BTCUSDT');
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT');
   assert.equal(snap, undefined, 'late ticker must not mutate store');
 });
 
@@ -192,7 +192,7 @@ test('9. stop invalidates late kline callback (no store mutation)', async () => 
 
   collector.emitKline(KLINE_CLOSED);
 
-  const snap = runtime.store.getSnapshot('BTCUSDT');
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT');
   assert.equal(snap, undefined, 'late kline must not mutate store');
 });
 
@@ -207,7 +207,7 @@ test('10. restart works: stop then start re-wires', async () => {
   assert.equal(runtime.isRunning, true);
 
   collector.emitTicker(TICKER);
-  const snap = runtime.store.getSnapshot('BTCUSDT');
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT');
   assert.ok(snap !== undefined);
   assert.ok(snap!.ticker !== null);
 });
@@ -234,11 +234,11 @@ test('11. restart invalidates old collector late callbacks', async () => {
   const newCollector = collectors[1];
 
   oldCollector.emitTicker({ ...TICKER, last: 11111 });
-  let snap = runtime.store.getSnapshot('BTCUSDT');
+  let snap = runtime.store.getSnapshot('bitget', 'BTCUSDT');
   assert.equal(snap, undefined, 'old collector callback rejected');
 
   newCollector.emitTicker(TICKER);
-  snap = runtime.store.getSnapshot('BTCUSDT');
+  snap = runtime.store.getSnapshot('bitget', 'BTCUSDT');
   assert.ok(snap !== undefined);
   assert.equal(snap!.ticker!.ticker.last, 67000);
   runtime.stop();
@@ -282,7 +282,7 @@ test('13. injected bus and store are used', async () => {
   collector.emitTicker(TICKER);
 
   assert.equal(observedTickers, 1);
-  assert.ok(store.getSnapshot('BTCUSDT') !== undefined);
+  assert.ok(store.getSnapshot('bitget', 'BTCUSDT') !== undefined);
   assert.equal(runtime.bus, bus);
   assert.equal(runtime.store, store);
 });
@@ -326,8 +326,8 @@ test('15. multi-symbol isolation via runtime', async () => {
   collector.emitTicker(TICKER);
   collector.emitTicker({ ...TICKER, instId: 'ETHUSDT', last: 3500 });
 
-  const btc = runtime.store.getSnapshot('BTCUSDT')!;
-  const eth = runtime.store.getSnapshot('ETHUSDT')!;
+  const btc = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
+  const eth = runtime.store.getSnapshot('bitget', 'ETHUSDT')!;
   assert.ok(btc !== undefined, 'BTC snapshot must exist');
   assert.ok(eth !== undefined, 'ETH snapshot must exist');
   assert.equal(btc.ticker!.ticker.last, 67000, 'BTC not overwritten by ETH');
@@ -347,7 +347,7 @@ test('16. multi-interval isolation via runtime', async () => {
   collector.emitKline(KLINE_CLOSED);
   collector.emitKline(kline5m);
 
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap.klines['1m'] !== undefined, '1m must exist');
   assert.ok(snap.klines['5m'] !== undefined, '5m must exist');
   assert.equal(snap.klines['1m'].kline.close, 67000, '1m data correct');
@@ -355,7 +355,7 @@ test('16. multi-interval isolation via runtime', async () => {
 
   const kline1mNew: WsKline = { ...KLINE_CLOSED, ts: 5001, close: 68000 };
   collector.emitKline(kline1mNew);
-  const snap2 = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap2 = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.equal(snap2.klines['1m'].kline.close, 68000, '1m update applied');
   assert.equal(snap2.klines['5m'].kline.close, 67000, '5m not overwritten');
   runtime.stop();
@@ -384,7 +384,7 @@ test('17. onError throwing does not break runtime', async () => {
 
   clock.advance(10);
   collector.emitTicker({ ...TICKER, last: 70000 });
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap !== undefined, 'store still writable after onError failure');
   assert.equal(snap.ticker!.ticker.last, 70000, 'subsequent valid event processed');
   runtime.stop();
@@ -414,10 +414,10 @@ test('18. two runtime instances independent', async () => {
   collectorA.emitTicker(TICKER);
   collectorB.emitTicker({ ...TICKER, instId: 'ETHUSDT', last: 3500 });
 
-  assert.ok(runtimeA.store.getSnapshot('BTCUSDT') !== undefined, 'A has BTC');
-  assert.equal(runtimeA.store.getSnapshot('ETHUSDT'), undefined, 'A has no ETH');
-  assert.ok(runtimeB.store.getSnapshot('ETHUSDT') !== undefined, 'B has ETH');
-  assert.equal(runtimeB.store.getSnapshot('BTCUSDT'), undefined, 'B has no BTC');
+  assert.ok(runtimeA.store.getSnapshot('bitget', 'BTCUSDT') !== undefined, 'A has BTC');
+  assert.equal(runtimeA.store.getSnapshot('bitget', 'ETHUSDT'), undefined, 'A has no ETH');
+  assert.ok(runtimeB.store.getSnapshot('bitget', 'ETHUSDT') !== undefined, 'B has ETH');
+  assert.equal(runtimeB.store.getSnapshot('bitget', 'BTCUSDT'), undefined, 'B has no BTC');
   assert.ok(runtimeA.bus !== runtimeB.bus, 'A and B have separate buses');
 
   runtimeA.stop();
@@ -425,7 +425,7 @@ test('18. two runtime instances independent', async () => {
   assert.equal(runtimeB.isRunning, true, 'B still running after A stopped');
   clockB.advance(100);
   collectorB.emitTicker({ ...TICKER, instId: 'ETHUSDT', last: 3600 });
-  const ethSnap = runtimeB.store.getSnapshot('ETHUSDT')!;
+  const ethSnap = runtimeB.store.getSnapshot('bitget', 'ETHUSDT')!;
   assert.equal(ethSnap.ticker!.ticker.last, 3600, 'B still processes after A stop');
   runtimeB.stop();
 });
@@ -446,9 +446,9 @@ test('19. stop detaches store subscribers (bus→store projection stops)', async
   // 1. Write initial ticker via collector
   await runtime.start();
   collector.emitTicker(TICKER);
-  assert.ok(store.getSnapshot('BTCUSDT') !== undefined, 'initial write ok');
+  assert.ok(store.getSnapshot('bitget', 'BTCUSDT') !== undefined, 'initial write ok');
 
-  const versionBefore = store.getSnapshot('BTCUSDT')!.snapshotVersion;
+  const versionBefore = store.getSnapshot('bitget', 'BTCUSDT')!.snapshotVersion;
 
   // 2. Stop — Bus→Store projection should be disconnected
   runtime.stop();
@@ -456,7 +456,7 @@ test('19. stop detaches store subscribers (bus→store projection stops)', async
   // 3. Directly publish to bus — should NOT reach store
   bus.publish('market.ticker.updated', { ticker: TICKER, receivedAt: Date.now() });
 
-  const snap = store.getSnapshot('BTCUSDT')!;
+  const snap = store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.equal(snap.snapshotVersion, versionBefore, 'version must NOT increase after stop');
   runtime.stop();
 });
@@ -481,7 +481,7 @@ test('20. start failure removes subscribers before retry', async () => {
 
   // 2. Publish directly to bus after failure — should NOT reach store
   bus.publish('market.ticker.updated', { ticker: TICKER, receivedAt: Date.now() });
-  assert.equal(store.getSnapshot('BTCUSDT'), undefined, 'store must remain empty after start failure');
+  assert.equal(store.getSnapshot('bitget', 'BTCUSDT'), undefined, 'store must remain empty after start failure');
 
   // 3. Retry with working collector
   collector.startShouldThrow = false;
@@ -490,7 +490,7 @@ test('20. start failure removes subscribers before retry', async () => {
 
   // 4. Single ticker → single version increment
   collector.emitTicker(TICKER);
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap !== undefined, 'retry start writes to store');
   assert.equal(snap.snapshotVersion, 1, 'single version increment after retry');
 
@@ -548,7 +548,7 @@ test('21. stop while collector start is pending — old cycle does not resurrect
 
   // Old collector callback must not write to store
   collector.emitTicker(TICKER);
-  assert.equal(store.getSnapshot('BTCUSDT'), undefined, 'old collector callback must not mutate store');
+  assert.equal(store.getSnapshot('bitget', 'BTCUSDT'), undefined, 'old collector callback must not mutate store');
 });
 
 // ── 22. old start resolve cannot corrupt restarted cycle ─────────────────────
@@ -653,7 +653,7 @@ test('23. old start rejection cannot damage restarted cycle', async () => {
 
   // Cycle 2 collector writes to store — single increment
   c2.emitTicker(TICKER);
-  const snap = runtime.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap !== undefined, 'cycle 2 writes to store');
   assert.equal(snap.snapshotVersion, 1, 'single version increment');
   runtime.stop();
@@ -675,12 +675,12 @@ test('24. kline event updates candleStore alongside snapshotStore', async () => 
   collector24.emitKline(KLINE_CLOSED);
 
   // Snapshot updated
-  const snap = runtime24.store.getSnapshot('BTCUSDT')!;
+  const snap = runtime24.store.getSnapshot('bitget', 'BTCUSDT')!;
   assert.ok(snap.klines['1m'] !== undefined, 'snapshot updated');
   assert.equal(snap.klines['1m'].kline.close, 67000);
 
   // CandleStore updated
-  const series = candle24.getSeries('BTCUSDT', '1m', 10);
+  const series = candle24.getSeries('bitget', 'BTCUSDT', '1m', 10);
   assert.equal(series.length, 1, 'candleStore has the kline');
   assert.equal(series[0].close, 67000);
   runtime24.stop();
@@ -702,7 +702,7 @@ test('25. injected candleStore reused across restart', async () => {
   collector25.emitKline(KLINE_CLOSED);
   runtime25.stop();
 
-  assert.equal(candle25.getSeries('BTCUSDT', '1m', 10).length, 1, '1 kline before restart');
+  assert.equal(candle25.getSeries('bitget', 'BTCUSDT', '1m', 10).length, 1, '1 kline before restart');
 
   // Restart with same candleStore
   const collector25b = new FakeCollector();
@@ -717,7 +717,7 @@ test('25. injected candleStore reused across restart', async () => {
   collector25b.emitKline({ ...KLINE_CLOSED, ts: KLINE_CLOSED.ts + 60000 });
   runtime25b.stop();
 
-  const series = candle25.getSeries('BTCUSDT', '1m', 10);
+  const series = candle25.getSeries('bitget', 'BTCUSDT', '1m', 10);
   assert.equal(series.length, 2, 'candleStore grew (not replaced)');
   assert.equal(series[0].close, 67000, 'first kline preserved');
   assert.equal(series[1].close, 67000, 'second kline appended');
@@ -739,12 +739,12 @@ test('26. stop + direct bus.publish does not update candleStore', async () => {
 
   await runtime26.start();
   collector26.emitKline(KLINE_CLOSED);
-  assert.equal(candle26.getSeries('BTCUSDT', '1m', 10).length, 1, 'kline written via collector');
+  assert.equal(candle26.getSeries('bitget', 'BTCUSDT', '1m', 10).length, 1, 'kline written via collector');
   runtime26.stop();
 
   // Direct bus.publish after stop
   bus26.publish('market.kline.closed', { kline: KLINE_CLOSED, receivedAt: Date.now() });
-  assert.equal(candle26.getSeries('BTCUSDT', '1m', 10).length, 1, 'candleStore unchanged after stop');
+  assert.equal(candle26.getSeries('bitget', 'BTCUSDT', '1m', 10).length, 1, 'candleStore unchanged after stop');
 });
 
 // ── 27. default candleStore created when none injected ──────────────────────

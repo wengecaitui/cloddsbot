@@ -261,7 +261,7 @@ test('6. closed kline written to candle store', async () => {
   getWs(f, 0).onmessage!({ data: JSON.stringify(closedKlineFrame('BTCUSDT', '1m', 1000)) });
   await new Promise(r => queueMicrotask(r));
   // getSeries(symbol, interval, count) returns an array of Series
-  const val = rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 1);
+  const val = rt.marketData.candleStore.getSeries('binance', 'BTC/USDT', '1m', 1);
   assert.ok(val !== undefined && val.length > 0, 'candle stored');
   if (val && val.length > 0) {
     assert.equal(val[0].close, 105);
@@ -285,7 +285,7 @@ test('7. open kline NOT written to candle store', async () => {
 
   getWs(f, 0).onmessage!({ data: JSON.stringify(openKlineFrame('BTCUSDT', '1m', 1000)) });
   await new Promise(r => queueMicrotask(r));
-  const val = rt.marketData.candleStore.getSeries('BTC/USDT', '1m', 1);
+  const val = rt.marketData.candleStore.getSeries('binance', 'BTC/USDT', '1m', 1);
   assert.ok(val === null || val.length === 0, 'open kline not stored');
 });
 
@@ -402,7 +402,7 @@ test('11. store cleanup removes stale symbols', async () => {
   // Inject a candle for ETH first
   getWs(f, 0).onmessage!({ data: JSON.stringify(closedKlineFrame('ETHUSDT', '1m', 1000)) });
   await new Promise(r => queueMicrotask(r));
-  let val = rt.marketData.candleStore.getSeries('ETH/USDT', '1m', 1);
+  let val = rt.marketData.candleStore.getSeries('binance', 'ETH/USDT', '1m', 1);
   assert.ok(val && val.length > 0, 'ETH candle stored');
 
   // Remove ETH from universe
@@ -416,7 +416,7 @@ test('11. store cleanup removes stale symbols', async () => {
   await ap;
 
   // ETH should be cleaned from stores
-  val = rt.marketData.candleStore.getSeries('ETH/USDT', '1m', 1);
+  val = rt.marketData.candleStore.getSeries('binance', 'ETH/USDT', '1m', 1);
   assert.ok(val === null || val.length === 0, 'ETH candle cleaned');
 });
 

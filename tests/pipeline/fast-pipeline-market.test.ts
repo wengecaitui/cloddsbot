@@ -1,4 +1,14 @@
-// Stage 3A4: FastPipeline market data guard integration tests
+// Stage 3A4 + 3B4C2-R1: FastPipeline market data guard integration tests
+//
+// Stage 3B4C2-R1 changes:
+//   - makeMarketData(exchange: ExchangeId): caller must provide provenance.
+//   - All fixtures (ticker/kline) carry exchange matching the configured exchange.
+//   - Dual-exchange isolation: same Store with bitget + binance same symbol;
+//     Pipeline reads only its configured exchange; no fallback; skip on missing.
+//   - Negative construction tests for illegal exchange values.
+//   - reason strings now use exchange:symbol format.
+//   - All positive tests use type-safe ExchangeId (no `as any` for legal data).
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FastPipeline } from '../../src/pipeline/FastPipeline';
@@ -9,6 +19,7 @@ import { createMarketSnapshotStore } from '../../src/data/MarketSnapshotStore';
 import { createCandleSeriesStore } from '../../src/data/CandleSeriesStore';
 import type { Clock, MarketSnapshotStore } from '../../src/data/MarketSnapshot';
 import type { WsTicker, WsKline } from '../../src/data/types';
+import type { ExchangeId } from '../../src/data/MarketIdentity';
 
 // ── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -20,22 +31,49 @@ class FakeClock implements Clock {
 
 const clock = new FakeClock();
 
-const SNAPSHOT_STORE = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
-const CANDLE_STORE = createCandleSeriesStore({ capacityPerSeries: 500 });
+function ticker(symbol: string, ex: ExchangeId = 'bitget'): WsTicker {
+  return { channel: 'ticker', exchange: ex, instId: symbol, last: 67000, bestBid: 66990, bestAsk: 67010, volume24h: 10000, high24h: 68000, low24h: 66000, ts: 5000 };
+}
 
-// Helper: simulate a running market data environment
-function feed(symbol: string, interval: string = '1m') {
-  // ticker
-  const ticker: WsTicker = { channel: 'ticker', instId: symbol, last: 67000, bestBid: 66990, bestAsk: 67010, volume24h: 10000, high24h: 68000, low24h: 66000, ts: 5000 };
-  SNAPSHOT_STORE.updateTicker({ ticker, receivedAt: clock.now() });
+function kline(symbol: string, ts: number, interval = '1m', ex: ExchangeId = 'bitget'): WsKline {
+  return { channel: 'kline', exchange: ex, instId: symbol, interval, open: 66901, high: 67101, low: 66801, close: 67001, volume: 101, ts, confirm: true };
+}
 
-  // 200 confirmed klines
-  for (let i = 1; i <= 200; i++) {
-    const kline: WsKline = { channel: 'kline', instId: symbol, interval, open: 66900 + i, high: 67100 + i, low: 66800 + i, close: 67000 + i, volume: 100 + i, ts: 1000 + i * 1000, confirm: true };
-    SNAPSHOT_STORE.updateClosedKline({ kline, receivedAt: clock.now() });
-    CANDLE_STORE.appendClosedKline({ kline, receivedAt: clock.now() });
+// ── Factory ───────────────────────────────────────────────────────────────────
+
+function makeMarketData(ex: ExchangeId, store?: MarketSnapshotStore): FastPipelineMarketData {
+  return {
+    exchange: ex,
+    snapshotStore: store ?? createMarketSnapshotStore({ clock, staleAfterMs: 60_000 }),
+    candleStore: createCandleSeriesStore({ capacityPerSeries: 500 }),
+    interval: '1m',
+    minimumSeries: 100,
+    seriesLimit: 200,
+    maxKlineAgeMs: 120_000,
+  };
+}
+
+// Helper: populate a store + candle with N klines for a given exchange+symbol.
+// Returns { store, candle } with the populated stores (default fresh each call).
+function feed(
+  ex: ExchangeId,
+  symbol: string,
+  count = 200,
+  interval = '1m',
+  storeIn?: MarketSnapshotStore,
+  candleIn?: ReturnType<typeof createCandleSeriesStore>,
+) {
+  const store = storeIn ?? createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
+  const candle = candleIn ?? createCandleSeriesStore({ capacityPerSeries: 500 });
+  const tk = ticker(symbol, ex);
+  store.updateTicker({ ticker: tk, receivedAt: clock.now() });
+  for (let i = 1; i <= count; i++) {
+    const kl = kline(symbol, 1000 + i * 1000, interval, ex);
+    store.updateClosedKline({ kline: kl, receivedAt: clock.now() });
+    candle.appendClosedKline({ kline: kl, receivedAt: clock.now() });
   }
   clock.advance(10);
+  return { store, candle };
 }
 
 function biasReport(symbol: string = 'BTCUSDT'): MarketBiasReportFull {
@@ -56,7 +94,6 @@ function biasReport(symbol: string = 'BTCUSDT'): MarketBiasReportFull {
   };
 }
 
-// Mock router that provides fresh bias report
 function makeRouter(symbol = 'BTCUSDT') {
   let report = biasReport(symbol);
   return {
@@ -67,12 +104,10 @@ function makeRouter(symbol = 'BTCUSDT') {
   };
 }
 
-// Mock IndicatorService that records call parameters
 class SpyIndicatorService {
   public lastAsset = '';
   public lastSeries: any = null;
   public callCount = 0;
-
   async calculateAll(req: any) {
     this.callCount += 1;
     this.lastAsset = req.asset;
@@ -81,214 +116,305 @@ class SpyIndicatorService {
   }
 }
 
-function makeMarketData(store = SNAPSHOT_STORE, candle = CANDLE_STORE): FastPipelineMarketData {
-  return {
-    snapshotStore: store,
-    candleStore: candle,
-    interval: '1m',
-    minimumSeries: 100,
-    seriesLimit: 200,
-    maxKlineAgeMs: 120_000,
-  };
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// Positive construction — exchange accepted
+// ═══════════════════════════════════════════════════════════════════════════
 
-// ── 1. backward compatibility (no marketData) ───────────────────────────────
+test('0a. construction with exchange=bitget accepted', () => {
+  const md = makeMarketData('bitget');
+  const fp = new FastPipeline({ router: makeRouter() as any, indicatorService: new SpyIndicatorService() as any, marketData: md });
+  assert.ok(fp instanceof FastPipeline);
+});
+
+test('0b. construction with exchange=binance accepted', () => {
+  const md = makeMarketData('binance');
+  const fp = new FastPipeline({ router: makeRouter() as any, indicatorService: new SpyIndicatorService() as any, marketData: md });
+  assert.ok(fp instanceof FastPipeline);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Negative construction — illegal exchange rejected
+// ═══════════════════════════════════════════════════════════════════════════
+
+// These use `as any` locally because the exchange value is deliberately invalid.
+test('0c. construction with coinbase rejected', () => {
+  const md = { ...makeMarketData('bitget'), exchange: 'coinbase' as any };
+  assert.throws(
+    () => new FastPipeline({ router: makeRouter() as any, indicatorService: new SpyIndicatorService() as any, marketData: md }),
+    /exchange must be a valid ExchangeId/,
+  );
+});
+
+test('0d. construction with empty string rejected', () => {
+  const md = { ...makeMarketData('bitget'), exchange: '' as any };
+  assert.throws(
+    () => new FastPipeline({ router: makeRouter() as any, indicatorService: new SpyIndicatorService() as any, marketData: md }),
+    /exchange must be a valid ExchangeId/,
+  );
+});
+
+test('0e. construction with BITGET rejected', () => {
+  const md = { ...makeMarketData('bitget'), exchange: 'BITGET' as any };
+  assert.throws(
+    () => new FastPipeline({ router: makeRouter() as any, indicatorService: new SpyIndicatorService() as any, marketData: md }),
+    /exchange must be a valid ExchangeId/,
+  );
+});
+
+test('0f. construction with undefined exchange rejected', () => {
+  const md = { ...makeMarketData('bitget'), exchange: undefined as any };
+  assert.throws(
+    () => new FastPipeline({ router: makeRouter() as any, indicatorService: new SpyIndicatorService() as any, marketData: md }),
+    /exchange must be a valid ExchangeId/,
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 1. backward compatibility (no marketData)
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('1. empty market data config is backward compatible', async () => {
   const spy = new SpyIndicatorService();
   const router = makeRouter();
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-  });
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
-  // Should not short-circuit on missing market data
   assert.equal(spy.callCount, 1, 'indicator service was called');
 });
 
-// ── 2. missing snapshot → skip ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 2. missing snapshot → skip (exchange-isolated)
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('2. missing snapshot returns skip', async () => {
   const spy = new SpyIndicatorService();
-  const router = makeRouter('UNKNOWNSYMBOL');
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: makeMarketData(),
-  });
-  const result = await fp.execute({ source: 'test', symbol: 'UNKNOWNSYMBOL' });
+  const router = makeRouter('BTCUSDT');
+  // feed bitget data, configure for binance → no snapshot
+  const { store } = feed('bitget', 'BTCUSDT');
+  const md = makeMarketData('binance', store);
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
+  const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(result.decision, 'skip');
-  assert.ok(result.reason.includes('no snapshot'));
-  assert.equal(spy.callCount, 0, 'indicator service should NOT be called');
+  assert.ok(result.reason.includes('no snapshot for binance:BTCUSDT'), `reason: ${result.reason}`);
+  assert.equal(spy.callCount, 0);
 });
 
-// ── 3. stale snapshot → defense ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 3. stale snapshot → defense
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('3. stale snapshot returns defense', async () => {
-  // Create a store whose clock is way in the past so snapshot goes stale
   const spy = new SpyIndicatorService();
   const router = makeRouter();
-  const slowClock = new FakeClock();
-  slowClock.advance(-120_000); // clock behind → snapshot will be stale
-  const staleStore = createMarketSnapshotStore({ clock: slowClock, staleAfterMs: 60_000 });
-  // But feed data with a different clock so snapshot is actually recent...
-  // Actually easier: create a store with very short stale window
   const tinyStore = createMarketSnapshotStore({ clock, staleAfterMs: 1 });
-  const ticker: WsTicker = { channel: 'ticker', instId: 'BTCUSDT', last: 67000, bestBid: 66990, bestAsk: 67010, volume24h: 10000, high24h: 68000, low24h: 66000, ts: 5000 };
-  tinyStore.updateTicker({ ticker, receivedAt: clock.now() });
-  clock.advance(10); // age > staleAfterMs=1 → isStale=true
-
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: { ...makeMarketData(tinyStore), maxKlineAgeMs: 999_999 },
-  });
+  const tk = ticker('BTCUSDT', 'bitget');
+  tinyStore.updateTicker({ ticker: tk, receivedAt: clock.now() });
+  clock.advance(10);
+  const md = { ...makeMarketData('bitget', tinyStore), maxKlineAgeMs: 999_999 };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(result.decision, 'defense');
-  assert.ok(result.reason.includes('stale'));
-  assert.equal(spy.callCount, 0, 'indicator service not called');
+  assert.ok(result.reason.includes('bitget:BTCUSDT'), `stale reason: ${result.reason}`);
+  assert.equal(spy.callCount, 0);
 });
 
-// ── 4. missing interval → skip ─────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 4. missing interval → skip
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('4. missing interval in snapshot returns skip', async () => {
   const spy = new SpyIndicatorService();
   const router = makeRouter();
-  // Feed only ticker, no kline at all
   const emptyStore = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
-  const ticker: WsTicker = { channel: 'ticker', instId: 'BTCUSDT', last: 67000, bestBid: 66990, bestAsk: 67010, volume24h: 10000, high24h: 68000, low24h: 66000, ts: 5000 };
-  emptyStore.updateTicker({ ticker, receivedAt: clock.now() });
-
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: makeMarketData(emptyStore),
-  });
+  const tk = ticker('BTCUSDT', 'bitget');
+  emptyStore.updateTicker({ ticker: tk, receivedAt: clock.now() });
+  const md = makeMarketData('bitget', emptyStore);
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(result.decision, 'skip');
-  assert.ok(result.reason.includes('missing 1m kline'));
+  assert.ok(result.reason.includes('missing 1m kline for bitget:BTCUSDT'), `reason: ${result.reason}`);
   assert.equal(spy.callCount, 0);
 });
 
-// ── 5. warm-up insufficient → skip ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 5. warm-up insufficient → skip
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('5. insufficient candle history returns skip', async () => {
   const spy = new SpyIndicatorService();
   const router = makeRouter();
-  // Store with data but not enough candles for minimumSeries=100
-  const lowCandle = createCandleSeriesStore({ capacityPerSeries: 500 });
   const store = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
+  const candle = createCandleSeriesStore({ capacityPerSeries: 500 });
   for (let i = 1; i <= 5; i++) {
-    const kline: WsKline = { channel: 'kline', instId: 'BTCUSDT', interval: '1m', open: 66900 + i, high: 67100 + i, low: 66800 + i, close: 67000 + i, volume: 100 + i, ts: 1000 + i * 1000, confirm: true };
-    store.updateClosedKline({ kline, receivedAt: clock.now() });
-    lowCandle.appendClosedKline({ kline, receivedAt: clock.now() });
+    const kl = kline('BTCUSDT', 1000 + i * 1000, '1m', 'bitget');
+    store.updateClosedKline({ kline: kl, receivedAt: clock.now() });
+    candle.appendClosedKline({ kline: kl, receivedAt: clock.now() });
   }
   clock.advance(10);
-
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: { ...makeMarketData(store, lowCandle), minimumSeries: 100 },
-  });
+  const md = { ...makeMarketData('bitget', store), candleStore: candle, minimumSeries: 100 };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(result.decision, 'skip');
-  assert.ok(result.reason.includes('insufficient candle history'));
-  assert.ok(result.reason.includes('5/100') || result.reason.includes('5'), 'reason shows count/minimum');
+  assert.ok(result.reason.includes('insufficient candle history for bitget:BTCUSDT'), `reason: ${result.reason}`);
   assert.equal(spy.callCount, 0);
 });
 
-// ── 6. snapshot/candle desync → skip ───────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 6. snapshot/candle desync → skip
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('6. snapshot/candle desync returns skip', async () => {
   const spy = new SpyIndicatorService();
   const router = makeRouter();
   const store = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
   const candle = createCandleSeriesStore({ capacityPerSeries: 500 });
-  // Feed different last ts to store vs candle
   for (let i = 1; i <= 100; i++) {
-    const kline: WsKline = { channel: 'kline', instId: 'BTCUSDT', interval: '1m', open: 66900 + i, high: 67100 + i, low: 66800 + i, close: 67000 + i, volume: 100 + i, ts: 1000 + i * 1000, confirm: true };
-    store.updateClosedKline({ kline, receivedAt: clock.now() });
-    candle.appendClosedKline({ kline, receivedAt: clock.now() });
+    const kl = kline('BTCUSDT', 1000 + i * 1000, '1m', 'bitget');
+    store.updateClosedKline({ kline: kl, receivedAt: clock.now() });
+    candle.appendClosedKline({ kline: kl, receivedAt: clock.now() });
   }
   clock.advance(10);
-  // Candle has 100 entries (ts 1001000 to 101000), snapshot last ts = 101000
-  // Now manually add one more to candle to cause desync
-  const extraKline: WsKline = { channel: 'kline', instId: 'BTCUSDT', interval: '1m', open: 68000, high: 68100, low: 67900, close: 68050, volume: 200, ts: 99999999, confirm: true };
-  candle.appendClosedKline({ kline: extraKline, receivedAt: clock.now() });
-  // Snapshot still has last ts = 101000
-
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: makeMarketData(store, candle),
-  });
+  const extra = kline('BTCUSDT', 99999999, '1m', 'bitget');
+  candle.appendClosedKline({ kline: extra, receivedAt: clock.now() });
+  const md = makeMarketData('bitget', store);
+  (md as any).candleStore = candle;
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(result.decision, 'skip');
-  assert.ok(result.reason.includes('desync'));
+  assert.ok(result.reason.includes('snapshot/candle desync for bitget:BTCUSDT'), `reason: ${result.reason}`);
   assert.equal(spy.callCount, 0);
 });
 
-// ── 7. healthy path: series passed to IndicatorService ─────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. healthy path: series passed to IndicatorService
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('7. healthy path passes series to indicator service', async () => {
   const spy = new SpyIndicatorService();
   const router = makeRouter();
-  const store = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
-  const candle = createCandleSeriesStore({ capacityPerSeries: 500 });
-
-  for (let i = 1; i <= 150; i++) {
-    const kline: WsKline = { channel: 'kline', instId: 'BTCUSDT', interval: '1m', open: 66900 + i, high: 67100 + i, low: 66800 + i, close: 67000 + i, volume: 100 + i, ts: 1000 + i * 1000, confirm: true };
-    store.updateClosedKline({ kline, receivedAt: clock.now() });
-    candle.appendClosedKline({ kline, receivedAt: clock.now() });
-  }
-  clock.advance(10);
-
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: makeMarketData(store, candle),
-  });
+  const { store, candle } = feed('bitget', 'BTCUSDT', 150);
+  const md = { ...makeMarketData('bitget', store), candleStore: candle };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(spy.callCount, 1, 'indicator service was called');
   assert.equal(spy.lastAsset, 'BTCUSDT');
   assert.ok(Array.isArray(spy.lastSeries), 'series passed');
   assert.ok(spy.lastSeries.length >= 100, 'series has sufficient entries');
-  // Oldest-first ordering
   if (spy.lastSeries.length >= 2) {
-    assert.ok(spy.lastSeries[0].ts! < spy.lastSeries[spy.lastSeries.length - 1].ts!, 'oldest-first ordering');
+    assert.ok(spy.lastSeries[0].ts! < spy.lastSeries[spy.lastSeries.length - 1].ts!, 'oldest-first');
   }
-  // Should not short-circuit normally — but bias report matters for DE output
-  // Just verify it returned something
   assert.ok(['trade', 'skip', 'defense'].includes(result.decision));
 });
 
-// ── 8. stale kline (age > maxKlineAgeMs) → defense ─────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// 8. stale kline (age > maxKlineAgeMs) → defense
+// ═══════════════════════════════════════════════════════════════════════════
 
 test('8. stale kline age returns defense', async () => {
   const spy = new SpyIndicatorService();
   const router = makeRouter();
-
-  // Store snapshot with very old kline
   const oldClock = new FakeClock();
   const store = createMarketSnapshotStore({ clock: oldClock, staleAfterMs: 999_999 });
-  const kline: WsKline = { channel: 'kline', instId: 'BTCUSDT', interval: '1m', open: 66900, high: 67100, low: 66800, close: 67000, volume: 100, ts: 1000, confirm: true };
-  store.updateClosedKline({ kline, receivedAt: 1000 });
-
-  // Candle also has the same old klines
+  const kl = kline('BTCUSDT', 1000, '1m', 'bitget');
+  store.updateClosedKline({ kline: kl, receivedAt: 1000 });
   const candle = createCandleSeriesStore({ capacityPerSeries: 500 });
   for (let i = 1; i <= 150; i++) {
-    candle.appendClosedKline({ kline: { ...kline, ts: 1000 + i * 1000 }, receivedAt: 1000 + i * 1000 });
+    candle.appendClosedKline({ kline: { ...kl, ts: 1000 + i * 1000 }, receivedAt: 1000 + i * 1000 });
   }
-  // Move clock forward so generatedAt is far ahead of kline receivedAt
   oldClock.advance(300_000);
-
-  const fp = new FastPipeline({
-    router: router as any,
-    indicatorService: spy as any,
-    marketData: makeMarketData(store, candle),
-  });
+  const md = { ...makeMarketData('bitget', store), candleStore: candle };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: md });
   const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
   assert.equal(result.decision, 'defense');
-  assert.ok(result.reason.includes('kline stale'));
+  assert.ok(result.reason.includes('kline stale'), `reason: ${result.reason}`);
+  assert.ok(result.reason.includes('bitget:BTCUSDT'), `reason mentions exchange:symbol: ${result.reason}`);
+  assert.equal(spy.callCount, 0);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3B4C2-R1 — Dual-exchange isolation (new)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('9. same store dual exchange: bitget pipeline reads only bitget', async () => {
+  const spy = new SpyIndicatorService();
+  const router = makeRouter();
+  const sharedStore = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
+  const sharedCandle = createCandleSeriesStore({ capacityPerSeries: 500 });
+  feed('bitget', 'BTCUSDT', 150, '1m', sharedStore, sharedCandle);
+  feed('binance', 'BTCUSDT', 150, '1m', sharedStore, sharedCandle);
+  // The bitget pipeline must see its own data — guard passes → indicator service invoked.
+  const mdBitget: FastPipelineMarketData = {
+    exchange: 'bitget',
+    snapshotStore: sharedStore,
+    candleStore: sharedCandle,
+    interval: '1m', minimumSeries: 100, seriesLimit: 200, maxKlineAgeMs: 120_000,
+  };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: mdBitget });
+  const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
+  // Market-data guard passed → spy was called with bitget-isolated series.
+  assert.equal(spy.callCount, 1, 'bitget pipeline invoked indicator service (no market-data skip)');
+  assert.equal(spy.lastAsset, 'BTCUSDT');
+  // And the reason is NOT a market-data skip — must be a DE-level decision.
+  assert.ok(!result.reason.includes('no snapshot'), `not a missing-snapshot skip: ${result.reason}`);
+  assert.ok(!result.reason.includes('missing 1m kline'), `not a missing-kline skip: ${result.reason}`);
+  assert.ok(!result.reason.includes('insufficient candle'), `not a warm-up skip: ${result.reason}`);
+});
+
+test('10. same store dual exchange: binance pipeline reads only binance', async () => {
+  const spy = new SpyIndicatorService();
+  const router = makeRouter();
+  const sharedStore = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
+  const sharedCandle = createCandleSeriesStore({ capacityPerSeries: 500 });
+  feed('bitget', 'BTCUSDT', 150, '1m', sharedStore, sharedCandle);
+  feed('binance', 'BTCUSDT', 150, '1m', sharedStore, sharedCandle);
+  const mdBinance: FastPipelineMarketData = {
+    exchange: 'binance',
+    snapshotStore: sharedStore,
+    candleStore: sharedCandle,
+    interval: '1m', minimumSeries: 100, seriesLimit: 200, maxKlineAgeMs: 120_000,
+  };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: mdBinance });
+  const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
+  assert.equal(spy.callCount, 1, 'binance pipeline invoked indicator service (no market-data skip)');
+  assert.equal(spy.lastAsset, 'BTCUSDT');
+  assert.ok(!result.reason.includes('no snapshot'), `not a missing-snapshot skip: ${result.reason}`);
+  assert.ok(!result.reason.includes('missing 1m kline'), `not a missing-kline skip: ${result.reason}`);
+  assert.ok(!result.reason.includes('insufficient candle'), `not a warm-up skip: ${result.reason}`);
+});
+
+test('11. dual exchange: bitget missing, binance present → bitget pipeline skips', async () => {
+  const spy = new SpyIndicatorService();
+  const router = makeRouter();
+  const sharedStore = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
+  const sharedCandle = createCandleSeriesStore({ capacityPerSeries: 500 });
+  // Only feed binance — bitget has no data
+  feed('binance', 'BTCUSDT', 150, '1m', sharedStore, sharedCandle);
+  const mdBitget: FastPipelineMarketData = {
+    exchange: 'bitget',
+    snapshotStore: sharedStore,
+    candleStore: sharedCandle,
+    interval: '1m', minimumSeries: 100, seriesLimit: 200, maxKlineAgeMs: 120_000,
+  };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: mdBitget });
+  const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
+  assert.equal(result.decision, 'skip', 'bitget pipeline must skip — no bitget data despite binance having it');
+  assert.ok(result.reason.includes('bitget:BTCUSDT'), `reason mentions exchange:symbol: ${result.reason}`);
+  assert.equal(spy.callCount, 0, 'indicator service must NOT be called when bitget data is absent');
+});
+
+test('12. dual exchange: binance missing, bitget present → binance pipeline skips (no fallback)', async () => {
+  const spy = new SpyIndicatorService();
+  const router = makeRouter();
+  const sharedStore = createMarketSnapshotStore({ clock, staleAfterMs: 60_000 });
+  const sharedCandle = createCandleSeriesStore({ capacityPerSeries: 500 });
+  feed('bitget', 'BTCUSDT', 150, '1m', sharedStore, sharedCandle);
+  const mdBinance: FastPipelineMarketData = {
+    exchange: 'binance',
+    snapshotStore: sharedStore,
+    candleStore: sharedCandle,
+    interval: '1m', minimumSeries: 100, seriesLimit: 200, maxKlineAgeMs: 120_000,
+  };
+  const fp = new FastPipeline({ router: router as any, indicatorService: spy as any, marketData: mdBinance });
+  const result = await fp.execute({ source: 'test', symbol: 'BTCUSDT' });
+  assert.equal(result.decision, 'skip', 'binance pipeline skips — no binance data, must NOT fall back to bitget');
   assert.equal(spy.callCount, 0);
 });

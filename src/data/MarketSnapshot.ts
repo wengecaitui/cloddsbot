@@ -1,7 +1,10 @@
-// Stage 3A2: MarketSnapshot — immutable market state types
+// Stage 3A2 + 3B4C2: MarketSnapshot — immutable market state types
 // Reuses WsTicker, WsKline directly. No copy/reduction.
+// Stage 3B4C2: MarketSnapshot carries exchange provenance; store API
+// requires explicit exchange parameter.
 
 import type { WsTicker, WsKline } from './types';
+import type { ExchangeId } from './MarketIdentity';
 
 // ── Clock abstraction ───────────────────────────────────────────────────────
 
@@ -24,7 +27,8 @@ export interface ReceivedClosedKline {
 // ── Snapshot ────────────────────────────────────────────────────────────────
 
 export interface MarketSnapshot {
-  readonly symbol: string;
+  readonly exchange: ExchangeId;
+  readonly symbol: string; // canonical
   readonly ticker: ReceivedTicker | null;
   readonly klines: Readonly<Record<string, ReceivedClosedKline>>;
   readonly snapshotVersion: number;
@@ -47,9 +51,9 @@ export interface MarketSnapshotStore {
     receivedAt: number;
   }): MarketSnapshot;
 
-  getSnapshot(symbol: string): MarketSnapshot | undefined;
+  getSnapshot(exchange: ExchangeId, symbol: string): MarketSnapshot | undefined;
 
   getAllSnapshots(): MarketSnapshot[];
 
-  removeSymbol(symbol: string): boolean;
+  removeSymbol(exchange: ExchangeId, symbol: string): boolean;
 }
