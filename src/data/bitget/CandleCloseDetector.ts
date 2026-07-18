@@ -1,11 +1,15 @@
-// Stage 3B2B + 3B4C1: Bitget V2 Candle Close Detector
+// Stage 3B2B + 3B4C1-R1: Bitget V2 Candle Close Detector
 // Purely deterministic state machine that infers candle closure from
 // startTs progression. Never uses snapshot/update action to decide confirm.
-// Stage 3B4C1: accepts ExchangeId to stamp provenance on every output.
+//
+// Stage 3B4C1-R1: Bitget-specialized component. The detector owns its own
+// exchange identity — every emitted WsKline is hardcoded to exchange: 'bitget'.
+// The API takes NO exchange parameter; callers cannot inject or override it.
+// This prevents a Bitget detector instance from ever being mislabeled as
+// Binance (or any other exchange).
 
 import type { BitgetCandleUpdate } from './PublicMessageParser';
 import type { WsKline } from '../types';
-import type { ExchangeId } from '../MarketIdentity';
 
 export interface CandleCloseDetector {
   ingest(update: BitgetCandleUpdate): readonly WsKline[];
@@ -44,10 +48,13 @@ function isValidUpdate(u: BitgetCandleUpdate): boolean {
   return true;
 }
 
-function toWsKline(exchange: ExchangeId, symbol: string, interval: string, c: CurrentCandle): WsKline {
+// Stage 3B4C1-R1: Bitget-specialized — exchange is hardcoded, not injectable.
+const BITGET_EXCHANGE = 'bitget' as const;
+
+function toWsKline(symbol: string, interval: string, c: CurrentCandle): WsKline {
   return {
     channel: 'kline',
-    exchange,
+    exchange: BITGET_EXCHANGE,
     instId: symbol,
     interval,
     open: c.open,
@@ -60,7 +67,7 @@ function toWsKline(exchange: ExchangeId, symbol: string, interval: string, c: Cu
   };
 }
 
-export function createCandleCloseDetector(exchange: ExchangeId): CandleCloseDetector {
+export function createCandleCloseDetector(): CandleCloseDetector {
   const states: StateMap = new Map();
 
   function getState(key: string): DetectorState {
@@ -91,7 +98,7 @@ export function createCandleCloseDetector(exchange: ExchangeId): CandleCloseDete
       // Skip emission if already emitted (dedup safety — shouldn't happen normally
       // because emitting moves current forward, but protects against logic regressions)
       if (state.lastEmittedStartTs !== prev.startTs) {
-        out.push(toWsKline(exchange, u.exchangeSymbol, u.interval, prev));
+        out.push(toWsKline(u.exchangeSymbol, u.interval, prev));
         state.lastEmittedStartTs = prev.startTs;
       }
       state.current = { startTs: u.startTs, open: u.open, high: u.high, low: u.low, close: u.close, volume: u.baseVolume };

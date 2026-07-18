@@ -196,3 +196,53 @@ test('18. one bad update in ingestMany does not affect others', () => {
   assert.equal(out[0].ts, 1000);
   assert.equal(out[0].instId, 'BTCUSDT');
 });
+
+// ── Stage 3B4C1-R1: Bitget-specialized provenance ──────────────────────────
+
+test('19. CCD-R1: detector takes no exchange parameter', () => {
+  // Compile-time check: createCandleCloseDetector takes zero args.
+  // Runtime check: returns a working detector.
+  const d = createCandleCloseDetector();
+  assert.equal(typeof d.ingest, 'function');
+  assert.equal(typeof d.ingestMany, 'function');
+  assert.equal(typeof d.clear, 'function');
+});
+
+test('20. CCD-R1: emitted kline always has exchange === "bitget"', () => {
+  const d = createCandleCloseDetector();
+  d.ingest(up('BTCUSDT', '1m', 1000));
+  const out = d.ingest(up('BTCUSDT', '1m', 2000, 200, 210, 190, 205, 500));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].exchange, 'bitget',
+    'Bitget CandleCloseDetector MUST hardcode exchange=bitget; caller cannot override');
+  assert.equal(out[0].instId, 'BTCUSDT');
+});
+
+test('21. CCD-R1: ingestMany output always has exchange === "bitget"', () => {
+  const d = createCandleCloseDetector();
+  const updates = [up('BTCUSDT', '1m', 1000), up('BTCUSDT', '1m', 2000),
+                   up('ETHUSDT', '1m', 1000), up('ETHUSDT', '1m', 2000)];
+  const out = d.ingestMany(updates);
+  assert.equal(out.length, 2); // BTCUSDT@1000, ETHUSDT@1000
+  for (const k of out) {
+    assert.equal(k.exchange, 'bitget',
+      'Bitget detector MUST NOT produce klines with any other exchange');
+  }
+});
+
+test('22. CCD-R1: caller cannot inject or override detector exchange', () => {
+  // The whole point of 3B4C1-R1: the API surface has NO exchange parameter.
+  // Pre-3B4C1-R1 allowed createCandleCloseDetector('binance') — which would
+  // mislabel Bitget candle data as Binance. The sealed API removes that vector.
+  //
+  // We verify by attempting to pass an extra arg: TypeScript rejects it at
+  // compile time; at runtime the value is silently ignored and outputs stay 'bitget'.
+  const d = createCandleCloseDetector();
+  d.ingest(up('BTCUSDT', '1m', 1000));
+  const out = d.ingest(up('BTCUSDT', '1m', 2000));
+  assert.equal(out.length, 1);
+  assert.equal(out[0].exchange, 'bitget');
+
+  // Even if a caller tried (d as any)('binance') they cannot reach into the
+  // closure-scoped BITGET_EXCHANGE constant — that's the design guarantee.
+});

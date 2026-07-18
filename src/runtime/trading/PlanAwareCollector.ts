@@ -1,11 +1,16 @@
-// Stage 3B1B-R1: Plan-aware collector wrapper with deep defensive snapshot
+// Stage 3B1B-R1 + 3B4C1-R1: Plan-aware collector wrapper with deep defensive snapshot
 // Translates exchange-level market events into canonical symbols using a
 // defensive snapshot of the SubscriptionPlan. Filters unsupported symbols
 // and intervals. Does not touch BitgetCollector — works at the port boundary.
+//
+// Stage 3B4C1-R1: exchange provenance is validated via isExchangeId() guard.
+// Any value not equal to 'bitget' or 'binance' (case-sensitive) is silently
+// dropped — never thrown, never re-emitted with a fabricated exchange.
 
 import type { WsTicker, WsKline } from '../../data/types';
 import type { MarketDataCollectorPort } from '../market/MarketDataRuntime';
 import type { SubscriptionPlan, SubscriptionEntry } from '../market/UniverseManager';
+import { isExchangeId } from '../../data/MarketIdentity';
 
 interface PlanSnapshot {
   readonly version: number;
@@ -59,12 +64,14 @@ export function createPlanAwareCollector(
     onTicker(handler: (ticker: WsTicker) => void): void {
       inner.onTicker((ticker) => {
         if (!ticker || typeof ticker.instId !== 'string') return;
-        if (typeof ticker.exchange !== 'string') return; // Stage 3B4C1: provenance required
+        // Stage 3B4C1-R1: hard exchange provenance guard — fail closed on invalid.
+        if (!isExchangeId((ticker as { exchange?: unknown }).exchange)) return;
         const entry = snap.byExchange.get(ticker.instId);
         if (!entry) return;
         if (entry.ticker === false) return;
 
         // Stage 3B4C1: preserve exchange provenance from source Collector.
+        // Only instId is rewritten; exchange is passed through unchanged.
         const clone: WsTicker = { ...ticker, instId: entry.symbol };
         handler(clone);
       });
@@ -73,12 +80,14 @@ export function createPlanAwareCollector(
     onKline(handler: (kline: WsKline) => void): void {
       inner.onKline((kline) => {
         if (!kline || typeof kline.instId !== 'string') return;
-        if (typeof kline.exchange !== 'string') return; // Stage 3B4C1: provenance required
+        // Stage 3B4C1-R1: hard exchange provenance guard — fail closed on invalid.
+        if (!isExchangeId((kline as { exchange?: unknown }).exchange)) return;
         const entry = snap.byExchange.get(kline.instId);
         if (!entry) return;
         if (!entry.intervals.includes(kline.interval)) return;
 
         // Stage 3B4C1: preserve exchange provenance from source Collector.
+        // Only instId is rewritten; exchange is passed through unchanged.
         const clone: WsKline = { ...kline, instId: entry.symbol };
         handler(clone);
       });

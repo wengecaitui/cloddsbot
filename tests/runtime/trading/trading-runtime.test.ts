@@ -200,6 +200,130 @@ test('7. PAC original event object not mutated', () => {
   assert.notEqual(seen[0], t, 'clone is new object');
 });
 
+// ── Stage 3B4C1-R1: PAC hard provenance guard ──────────────────────────────
+
+test('7a. PAC-R1: ticker with exchange="coinbase" is dropped', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsTicker[] = [];
+  pac.onTicker(t => seen.push(t));
+
+  // Build a ticker with invalid exchange provenance.
+  const t = { ...ticker('BTCUSDT'), exchange: 'coinbase' as any };
+  inner.emitTicker(t);
+  assert.equal(seen.length, 0, 'invalid exchange provenance MUST be silently dropped (fail closed)');
+});
+
+test('7b. PAC-R1: ticker with exchange="" is dropped', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsTicker[] = [];
+  pac.onTicker(t => seen.push(t));
+
+  const t = { ...ticker('BTCUSDT'), exchange: '' as any };
+  inner.emitTicker(t);
+  assert.equal(seen.length, 0, 'empty-string exchange MUST be dropped');
+});
+
+test('7c. PAC-R1: ticker with exchange="BITGET" (case variant) is dropped', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsTicker[] = [];
+  pac.onTicker(t => seen.push(t));
+
+  const t = { ...ticker('BTCUSDT'), exchange: 'BITGET' as any };
+  inner.emitTicker(t);
+  assert.equal(seen.length, 0, 'case variant MUST be dropped — guard is case-sensitive');
+});
+
+test('7d. PAC-R1: ticker with null/undefined exchange is dropped', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsTicker[] = [];
+  pac.onTicker(t => seen.push(t));
+
+  inner.emitTicker({ ...ticker('BTCUSDT'), exchange: null as any });
+  inner.emitTicker({ ...ticker('BTCUSDT'), exchange: undefined as any });
+  assert.equal(seen.length, 0, 'null/undefined exchange MUST be dropped');
+});
+
+test('7e. PAC-R1: ticker with exchange="bitget" is preserved unchanged', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsTicker[] = [];
+  pac.onTicker(t => seen.push(t));
+
+  inner.emitTicker(ticker('BTCUSDT')); // default exchange: 'bitget' (from fixture helper)
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].exchange, 'bitget', 'bitget provenance MUST be preserved (not rewritten)');
+  assert.equal(seen[0].instId, 'BTC/USDT', 'instId MUST be rewritten to canonical');
+});
+
+test('7f. PAC-R1: ticker with exchange="binance" is preserved unchanged', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsTicker[] = [];
+  pac.onTicker(t => seen.push(t));
+
+  const t = { ...ticker('BTCUSDT'), exchange: 'binance' as any };
+  inner.emitTicker(t);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].exchange, 'binance', 'binance provenance MUST be preserved');
+  assert.equal(seen[0].instId, 'BTC/USDT');
+});
+
+test('7g. PAC-R1: kline with exchange="coinbase" is dropped', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsKline[] = [];
+  pac.onKline(k => seen.push(k));
+
+  const k = { ...kline('BTCUSDT', '1m'), exchange: 'coinbase' as any };
+  inner.emitKline(k);
+  assert.equal(seen.length, 0, 'invalid kline provenance MUST be dropped');
+});
+
+test('7h. PAC-R1: kline with exchange="" is dropped', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsKline[] = [];
+  pac.onKline(k => seen.push(k));
+
+  const k = { ...kline('BTCUSDT', '1m'), exchange: '' as any };
+  inner.emitKline(k);
+  assert.equal(seen.length, 0);
+});
+
+test('7i. PAC-R1: kline with exchange="bitget" is preserved', () => {
+  const inner = new FakeColl();
+  const plan = makeUniverse().getPlan();
+  const pac = createPlanAwareCollector(inner, plan);
+
+  const seen: WsKline[] = [];
+  pac.onKline(k => seen.push(k));
+
+  inner.emitKline(kline('BTCUSDT', '1m')); // default exchange: 'bitget'
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].exchange, 'bitget');
+  assert.equal(seen[0].instId, 'BTC/USDT');
+});
+
 test('8. PAC plan mutation after construction does not affect behavior', () => {
   const inner = new FakeColl();
   const um = makeUniverse(['BTC/USDT']);

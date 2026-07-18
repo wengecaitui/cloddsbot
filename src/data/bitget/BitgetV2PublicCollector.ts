@@ -151,7 +151,7 @@ export class BitgetV2PublicCollector {
       }
     }
 
-    this.closeDetector = createCandleCloseDetector('bitget');
+    this.closeDetector = createCandleCloseDetector();
     this.wsFactory = options.webSocketFactory ?? defaultWebSocketFactory;
     this.scheduler = options.scheduler ?? defaultScheduler;
 
