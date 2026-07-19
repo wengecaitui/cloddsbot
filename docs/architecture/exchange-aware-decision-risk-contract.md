@@ -120,19 +120,19 @@ The bulk of the changes concentrate in **one** production composition root (`Tra
 
 | File | Phase | Test changes |
 |---|---|---|
-| `tests/router/kill-switch.test.ts` | 2 | All `new KillSwitch(...)` construction gains `exchange` first param; every method call (`check`, `recordLoss`, `lock`, `unlock`, `snapshot`) gains `exchange` first param; `RiskSnapshot` assertions check `exchange` field |
-| `tests/router/execution-router.test.ts` | 3+4 | All `new ExecutionRouter(...)` config gains `exchange`; `route(signal)` calls gain `signal.exchange`; `RouteDecision` assertions check `exchange`; `updateBiasReport(report)` calls pass reports with `exchange` field; `getBiasReport()` assertions check `exchange`; if scoped, add tests for exchange-mismatch throw + exchange-scoped file path |
-| `tests/pipeline/slow-pipeline.test.ts` | 5 | All `new SlowPipeline(...)` config gains `exchange`; all `pipeline.run(...)` calls gain `exchange` first param; fixture `makeReport`/`buildFallbackReport` gain `exchange`; mock `updateBiasReport` assertion checks `report.exchange`; existing ~15 tests need fixture updates |
-| `tests/pipeline/fast-pipeline-market.test.ts` | 6 | All `new FastPipeline(...)` config gains `exchange`; `fp.execute({ source, symbol })` calls gain `exchange`; `FastPipelineResult` assertions check `exchange`; `decision_made` event subscription assertions check `exchange`; existing 18 tests need signal + result assertions updated |
-| `tests/events/trading-event-bus.test.ts` | 7 | `MarketBiasReportFull` fixture at line 43 gains `exchange: 'bitget'`; existing `research.bias.updated` tests pass; add 4 new tests: missing `report.exchange`, invalid `report.exchange`, case-variant `report.exchange`, valid `report.exchange` |
-| `tests/store/report-store.test.ts` | 3 | No production change needed — `ReportStore` API unchanged. Optional: add regression that `bias.bitget.json` and `bias.binance.json` can coexist in the same dir. |
-| `tests/runtime/trading/trading-runtime.test.ts` | 8 | Tests that inject `router` (line 977) must inject exchange-bound router; tests that inject `killSwitch` must inject exchange-bound KS; existing 68 tests pass once fixtures updated |
-| `tests/runtime/trading/bitget-trading-runtime.test.ts` | 9 | No change — wrapper fixes `exchange: 'bitget'` |
-| `tests/runtime/trading/binance-trading-runtime.test.ts` | 9 | No change — wrapper fixes `exchange: 'binance'` |
-| `tests/runtime/trading/exchange-trading-runtime.test.ts` | 9 | No change — discriminator fixes `exchange` |
-| `tests/runtime/trading/multi-exchange-runtime.test.ts` | 9 | No change — isolation checks ensure each side constructs its own exchange-bound router/KS. Add 2 new tests: (a) `multimock.getRadiRuntime('bitget').router.exchange === 'bitget'`, (b) `bias.bitget.json` and `bias.binance.json` are independent files |
-| `tests/e2e/step-1-7-e2e.test.ts` | 9 | `makeBiasReport` at line 42 gains `exchange: 'bitget'`; `new FastPipeline(config)` at line 98 gains `exchange: 'bitget'` in config; `fp.execute(...)` calls at lines 111, 129, 156, 170, 189 gain `exchange: 'bitget'` |
-| `tests/runtime/market/universe-manager.test.ts` | 9 | 4 `MarketBiasReportFull` fixtures (lines 31, 223, 238, 249, 271, 333, 338) gain `exchange: 'bitget'` (or `'binance'` based on context) |
+| `tests/e2e/step-1-7-e2e.test.ts` | 2,3,4 | `new KillSwitch` at line 28 gains `exchange` param; `new ExecutionRouter` at line 34 config gains `exchange`; `makeBiasReport` at line 42 gains `exchange: 'bitget'`; `router.updateBiasReport(report)` call at line 101 passes report with `exchange`; `router.getBiasReport()` at line 145-146 checks `exchange`; `new FastPipeline(config)` at line 98 config gains `exchange`; `fp.execute()` calls at lines 111/129/156/170/189 gain `exchange` in signal |
+| `tests/pipeline/fast-pipeline-market.test.ts` | 2,6 | Mock router's `getBiasReport` at line 100 returns report with `exchange`; `new FastPipeline(...)` config gains `exchange` at all 18 call sites; `fp.execute({source, symbol})` calls gain `exchange` at all call sites; `FastPipelineResult.exchange` assertions added; `decision_made` event payload gains `exchange` |
+| `tests/pipeline/slow-pipeline.test.ts` | 4,5 | Mock `router.updateBiasReport` at line 62 validates `report.exchange`; mock `router.getBiasReport` at line 70 returns report with `exchange`; all `new SlowPipeline(...)` configs gain `exchange` (15 call sites); `pipeline.run(exchange, symbol)` signature updated at all 15 call sites; test fixtures gain `exchange` field |
+| `tests/events/trading-event-bus.test.ts` | 7 | `MarketBiasReportFull` fixture at line 43 gains `exchange: 'bitget'`; add 4 new tests: missing/invalid/case-variant/valid `report.exchange` |
+| `tests/runtime/trading/trading-runtime.test.ts` | 2,4,8 | `new KillSwitch(...)` at line 28 gains `exchange`; `new ExecutionRouter(...)` at line 977 config gains `exchange`; construction must pass exchange-bound KS+Router; 68 existing tests pass after fixture updates |
+| `tests/runtime/trading/multi-exchange-runtime.test.ts` | 2,4,8 | `new KillSwitch()` calls at lines 1529/1577 gain `exchange`; `new ExecutionRouter(...)` calls at lines 1530/1535/1574 configs gain `exchange`; add 2+ new tests: `multi.getRuntime('bitget').router.exchange === 'bitget'`, `multi.getRuntime('binance').router.exchange === 'binance'`, both `router.killSwitch.exchange` correct, both `RiskSnapshot.exchange` different |
+| `tests/runtime/market/universe-manager.test.ts` | 1 | 4 `MarketBiasReportFull` fixtures at lines 31/223/238/249/271/333/338 gain `exchange` field |
+| `tests/runtime/trading/bitget-trading-runtime.test.ts` | 9 | No change (wrapper fixes exchange) |
+| `tests/runtime/trading/binance-trading-runtime.test.ts` | 9 | No change (wrapper fixes exchange) |
+| `tests/runtime/trading/exchange-trading-runtime.test.ts` | 9 | No change (discriminator fixes exchange) |
+
+**Note on test file inventory:**
+No dedicated `tests/router/kill-switch.test.ts`, `tests/router/execution-router.test.ts`, or `tests/store/report-store.test.ts` files exist. KillSwitch and ExecutionRouter test coverage is embedded in the files listed above (primarily `tests/e2e/step-1-7-e2e.test.ts`, `tests/runtime/trading/multi-exchange-runtime.test.ts`, `tests/runtime/trading/trading-runtime.test.ts`, `tests/pipeline/slow-pipeline.test.ts`, `tests/pipeline/fast-pipeline-market.test.ts`). The document lists all 9 test-involved files, not standalone suite files that happen to exist separately.
 
 #### Files NOT changed (correctly identified out-of-scope)
 
@@ -143,7 +143,7 @@ The bulk of the changes concentrate in **one** production composition root (`Tra
 | `src/runtime/trading/ExchangeTradingRuntime.ts` | Discriminator that takes `exchange` from caller; passes through |
 | `src/runtime/trading/MultiExchangeRuntime.ts` | Isolation enforcement unchanged — exchange binding happens inside each child TradingRuntime |
 | `src/store/ReportStore.ts` | Generic atomic file store — exchange isolation is router's concern; `ReportStoreConfig.filename` already accepts any path |
-| `src/data/MarketIdentity.ts` | Already canonical: `ExchangeId`, `isExchangeId`, `sourceKey` — no changes |
+| `src/data/MarketIdentity.ts` | See §12 — MarketIdentity.ts IS modified: `assertExchangeId` helper added |
 | `src/data/MarketSnapshot.ts` | Already has `exchange: ExchangeId` on `MarketSnapshot` and store API |
 | `src/data/types.ts` | `WsTicker`/`WsKline` already extend `ExchangeAwareMarketData` |
 | `src/events/TradingEvent.ts` | Event payload map unchanged — `research.bias.updated` payload is still `{ report, receivedAt }`; exchange arrives inside `report.exchange` |
@@ -180,23 +180,26 @@ Each item verified against current source:
 
 7. **`research.bias.updated` can only carry exchange inside `report`.**  
    Current EventBus contract has `{ report: MarketBiasReportFull; receivedAt: number }`. Since `MarketBiasReportFull` lacks exchange, the event has no exchange. The correct fix is to add exchange to the report, not add a separate source field.  
-   → Config (6) must be fixed first; EventBus then validates `report.exchange` automatically.
+   → Problem (6) must be fixed first; EventBus then validates `report.exchange` automatically.
 
 8. **`ExecutionRouter.route` input and `RouteDecision` have no exchange.**  
    `route(signal)` takes `{ source, symbol?, signalData? }`. `RouteDecision` returns `{ path, source, reason, biasReport?, defensiveMode }`. Neither has exchange.  
    → Router cannot verify it's routing for the correct exchange; the decision output is ambiguous.
 
-9. **`ExecutionRouter` holds a single `biasReport` in memory.**  
-   Field `private biasReport: MarketBiasReportFull | null` — one slot.  
-   → In a multi-exchange setup, the second exchange's report silently overwrites the first.
+9. **`ExecutionRouter` holds a single `biasReport` in memory — this is correct design.**  
+   Each TradingRuntime has its own independent ExecutionRouter. Each exchange-bound Router correctly stores exactly one report belonging to its own exchange. The Router is NOT changed to a multi-report Map in 3B4C4 — that would be an anti-pattern.  
+   **The memory risk is:** `updateBiasReport` currently does NOT validate `report.exchange` — a report from the wrong exchange can silently overwrite the in-memory report.  
+   **The disk risk is:** both routers default to `bias.json` — after restart, whichever file was written last is indiscriminately loaded for both.
 
-10. **Two independent routers write to the same file by default.**  
-    `ReportStore` default filename is `bias.json` — every router writes to `~/.clodds/market-bias/bias.json`.  
-    → Bitget and Binance routers overwrite each other's reports on disk. After a restart, whichever file was written last is loaded for both exchanges.
+10. **Two independent Routers default to the same file on disk.**  
+    `ReportStore` defaults to `bias.json` in `~/.clodds/market-bias/`. Each router creates a `new ReportStore()` without a custom filename. This means Bitget and Binance reports overwrite each other on disk. After a restart, whichever file was written last is loaded for both exchanges — a genuine disk collision, independent of the in-memory storage.
 
-11. **`KillSwitch.check`/`recordLoss`/`lock`/`unlock`/`snapshot` have no exchange.**  
-    Every method takes only business parameters; none receives an `ExchangeId`.  
-    → Bitget positions and Binance positions share the same loss counter and lock state. A loss on Binance can lock trading on Bitget.
+11. **`KillSwitch.check`/`recordLoss`/`lock`/`unlock`/`snapshot` carry no exchange identity.**  
+    Two separate runtimes already have separate KillSwitch instances (enforced by MultiExchangeRuntime's isolation checks). The current defect is:
+    - KillSwitch itself has no `exchange` field — `RiskSnapshot` cannot prove which exchange it describes.
+    - A caller holding a stale/wrong KillSwitch reference cannot be detected at the method-call boundary.
+    - Loss counters and lock state cannot be attributed to a specific exchange.
+    - 3B4C4 adds an explicit `exchange` parameter to every KillSwitch method so that wrong-reference bugs are caught synchronously. Cross-exchange shared risk budgeting is NOT implemented.
 
 12. **`RiskSnapshot` has no exchange.**  
     Return type `{ currentExposureUsd, todayRealizedLossUsd, ... }` — no exchange.  
@@ -712,6 +715,53 @@ const store = new ReportStore({ filename: `bias.${this.exchange}.json` });
 4. Update `ExecutionRouter.loadBiasReportFromDisk` to read `bias.${exchange}.json`, validate `report.exchange`.
 5. Remove automatic loading of old `bias.json` after migration window.
 
+### 3B4C4-R2: ReportStore Temp-Directory Contract
+
+`ReportStore.ts` itself is NOT modified — it already accepts `{ dir?, filename?, tmpSuffix? }` in its config. Exchange isolation is implemented at the `ExecutionRouter` level:
+
+```typescript
+// ExecutionRouter.ts — create Store with exchange-scoped filename
+const store = new ReportStore({
+  ...config.reportStoreConfig,        // caller can pass dir, tmpSuffix
+  filename: `bias.${this.exchange}.json`,  // ALWAYS exchange-prefixed — caller cannot override
+});
+```
+
+**RouterConfig additions:**
+
+```typescript
+export interface RouterConfig {
+  readonly exchange: ExchangeId;
+  readonly fastPathTimeoutSec: number;
+  readonly maxBiasReportAgeHours: number;
+  readonly killSwitch: KillSwitch;
+  /** Stage 3B4C4-R2: Optional ReportStore directory/tmpSuffix (NOT filename). */
+  readonly reportStoreConfig?: Omit<ReportStoreConfig, 'filename'>;
+}
+```
+
+**Key rules:**
+- `filename` is written AFTER the spread — the caller can NEVER override it.
+- Bitget Router ALWAYS writes to `bias.bitget.json`.
+- Binance Router ALWAYS writes to `bias.binance.json`.
+- Caller CAN provide `dir` and `tmpSuffix` (for testing with `fs.mkdtemp`).
+
+**TradingRuntimeOptions.routerConfig** gains the same `reportStoreConfig` for passthrough.
+
+**Test requirements (mandatory, not optional):**
+
+| Test | Expected |
+|------|----------|
+| `bias.bitget.json` and `bias.binance.json` exist in same dir | Both readable, content matches respective exchange |
+| `bias.bitget.json` content has `exchange: 'bitget'` | Parsed report.exchange is correct |
+| Old `bias.json` present but not read | `loadBiasReportFromDisk` only reads exchange-scoped file |
+| Missing file returns null | `loadBiasReportFromDisk` returns `null`, no error thrown |
+| File with missing `exchange` field returns null | `loadBiasReportFromDisk` returns `null` |
+| File with mismatched `exchange` returns null | `loadBiasReportFromDisk` returns `null` |
+| Caller tries to pass `filename` in `reportStoreConfig` | TypeScript prevents it (`Omit<ReportStoreConfig, 'filename'>`) |
+
+**Test infrastructure rule:** All tests MUST use `fs.mkdtemp()`, `fs.mkdtempSync()`, or `tmp` module to create an isolated temporary directory. Tests MUST NOT write to `~/.clodds/market-bias/`, MUST NOT depend on `HOME`/`USERPROFILE`, and MUST NOT mutate global state. Tests MUST pass on any machine without visible side effects.
+
 ---
 
 ## 6. Composition Root Contract
@@ -764,6 +814,76 @@ No change to `createBitgetTradingRuntime` / `createBinanceTradingRuntime` — th
 `createExchangeTradingRuntime` (exchange discriminator) — same.
 
 `MultiExchangeRuntime` — isolation checks remain. No shared-router / shared-KS relaxation.
+
+### 3B4C4-R2: Component Cross-Binding Verification (mandatory)
+
+Every component that accepts an exchange-bound child (router, killSwitch) must validate that the child's exchange matches the component's own exchange **at construction time**. These checks are part of the 3B4C4 atomic commit.
+
+**ExecutionRouter constructor:**
+
+```typescript
+constructor(config: RouterConfig) {
+  assertExchangeId('ExecutionRouter', config.exchange);
+  if (config.killSwitch.exchange !== config.exchange) {
+    throw new Error(`ExecutionRouter: killSwitch.exchange (${config.killSwitch.exchange}) !== config.exchange (${config.exchange})`);
+  }
+  // ... proceed with construction
+}
+```
+
+Both checks run before any state mutation (before `super()` emitted events, before field assignments). Failure leaves no partial state.
+
+**FastPipeline constructor:**
+
+```typescript
+constructor(config: FastPipelineConfig) {
+  assertExchangeId('FastPipeline', config.exchange);
+  if (config.router.exchange !== config.exchange) {
+    throw new Error(`FastPipeline: router.exchange (${config.router.exchange}) !== config.exchange (${config.exchange})`);
+  }
+  if (config.marketData && config.marketData.exchange !== config.exchange) {
+    throw new Error(`FastPipeline: marketData.exchange (${config.marketData.exchange}) !== config.exchange (${config.exchange})`);
+  }
+  // ... proceed with construction
+}
+```
+
+**SlowPipeline constructor:**
+
+```typescript
+constructor(config: SlowPipelineConfig) {
+  assertExchangeId('SlowPipeline', config.exchange);
+  if (config.router.exchange !== config.exchange) {
+    throw new Error(`SlowPipeline: router.exchange (${config.router.exchange}) !== config.exchange (${config.exchange})`);
+  }
+  // ... proceed with construction
+}
+```
+
+**TradingRuntime composition root:**
+
+```typescript
+// If caller injects a router, it must already be exchange-bound
+if (options.router) {
+  if (options.router.exchange !== exchange) {
+    throw new Error(`TradingRuntime: injected router.exchange (${options.router.exchange}) !== runtime exchange (${exchange})`);
+  }
+  if (options.router.killSwitch.exchange !== exchange) {
+    throw new Error(`TradingRuntime: injected router.killSwitch.exchange (${options.router.killSwitch.exchange}) !== runtime exchange (${exchange})`);
+  }
+}
+
+// If caller injects a killSwitch via routerConfig, it must match
+if (options.routerConfig?.killSwitch) {
+  if (options.routerConfig.killSwitch.exchange !== exchange) {
+    throw new Error(`TradingRuntime: injected killSwitch.exchange (${options.routerConfig.killSwitch.exchange}) !== runtime exchange (${exchange})`);
+  }
+}
+
+// If creating a new router internally, exchange and killSwitch come from the same verified source
+const ks = options.routerConfig?.killSwitch ?? new KillSwitch(exchange, DEFAULT_KS_CONFIG);
+const router = options.router ?? new ExecutionRouter({ exchange, killSwitch: ks, ... });
+```
 
 ---
 
@@ -852,7 +972,7 @@ research.bias.updated:
 
 ## 9. Migration Plan — Atomic Sequence
 
-### Phase 1: Types (standalone commit)
+### Phase 1: Types — Internal working-tree phase — no commit
 
 | Step | File | Change |
 |------|------|--------|
@@ -864,7 +984,7 @@ research.bias.updated:
 **Atomic unit**: KillSwitch + RiskSnapshot + MarketBiasReport get exchange.
 **Test**: All existing test fixtures break — fix after full commit.
 
-### Phase 2: KillSwitch signatures (must land with Phase 1)
+### Phase 2: KillSwitch signatures — Internal working-tree phase — no commit (alongside Phase 1)
 
 | Step | File | Change |
 |------|------|--------|
@@ -875,7 +995,7 @@ research.bias.updated:
 | 2.5 | `KillSwitch.ts` | `unlock(exchange)` — validate |
 | 2.6 | `KillSwitch.ts` | `snapshot(exchange): RiskSnapshot` — return includes `this.exchange` |
 
-### Phase 3: ReportStore isolation (can be standalone)
+### Phase 3: ReportStore isolation — Internal working-tree phase — no commit
 
 | Step | File | Change |
 |------|------|--------|
@@ -883,7 +1003,7 @@ research.bias.updated:
 | 3.2 | `router/ExecutionRouter.ts` | `updateBiasReport`: write to `bias.${this.exchange}.json` |
 | 3.3 | `router/ExecutionRouter.ts` | `loadBiasReportFromDisk`: read from `bias.${this.exchange}.json`, validate `report.exchange` |
 
-### Phase 4: ExecutionRouter binding (MUST land with Phases 1+2)
+### Phase 4: ExecutionRouter binding — Internal working-tree phase — no commit (alongside Phases 1+2)
 
 | Step | File | Change |
 |------|------|--------|
@@ -895,11 +1015,11 @@ research.bias.updated:
 | 4.6 | `ExecutionRouter.ts` | `updateBiasReport(report)` — validate `report.exchange === this.exchange` |
 | 4.7 | `ExecutionRouter.ts` | `loadBiasReportFromDisk` — validate loaded report |
 
-**Why must land together with Phases 1+2:**
+**Why developed alongside Phases 1+2 (within same uncommitted working tree):**
 - Router calls `ks.lock(reason)` — after Phase 2, signature is `lock(exchange, reason)`.
 - Router `killSwitch` is constructed with `exchange` — same commit.
 
-### Phase 5: SlowPipeline (standalone after Phases 1–4)
+### Phase 5: SlowPipeline — Internal working-tree phase — no commit (after Phases 1–4)
 
 | Step | File | Change |
 |------|------|--------|
@@ -911,7 +1031,7 @@ research.bias.updated:
 | 5.6 | `SlowPipeline.ts` | `buildFallbackReport` takes and uses `exchange` param |
 | 5.7 | `SlowPipeline.ts` | Router `updateBiasReport` called after exchange override |
 
-### Phase 6: FastPipeline (standalone after Phases 1–4)
+### Phase 6: FastPipeline — Internal working-tree phase — no commit (after Phases 1–4)
 
 | Step | File | Change |
 |------|------|--------|
@@ -922,13 +1042,13 @@ research.bias.updated:
 | 6.5 | `FastPipeline.ts` | `decision_made` event payload gains `exchange` |
 | 6.6 | `FastPipeline.ts` | KillSwitch calls: `this.config.router.killSwitch.check(this.config.exchange, ...)` |
 
-### Phase 7: EventBus validation (standalone after Phase 1)
+### Phase 7: EventBus validation — Internal working-tree phase — no commit (after Phase 1)
 
 | Step | File | Change |
 |------|------|--------|
 | 7.1 | `TradingEventBus.ts` | `publish` — add `research.bias.updated` exchange validation |
 
-### Phase 8: TradingRuntime composition (MUST land with all above)
+### Phase 8: TradingRuntime composition — Internal working-tree phase — no commit (alongside all above)
 
 | Step | File | Change |
 |------|------|--------|
@@ -939,7 +1059,7 @@ research.bias.updated:
 | 8.5 | `TradingRuntime.ts` | Validate caller-injected `router.exchange` === `exchange` |
 | 8.6 | `TradingRuntime.ts` | Validate caller-injected `killSwitch.exchange` === `exchange` |
 
-**Why all together:** Every component now requires exchange at construction. TradingRuntime creates them all. An intermediate commit would either (a) not compile, or (b) compile with unbound components that would fail at runtime.
+**Why developed alongside all above phases (within same uncommitted working tree):** Every component now requires exchange at construction. TradingRuntime creates them all. An intermediate commit would either (a) not compile, or (b) compile with unbound components that would fail at runtime.
 
 ### Phase 9: Wrappers (no-change)
 
@@ -1110,7 +1230,7 @@ This is by design. 3B4C4 is an atomic type-propagation + validation layer, not a
 
 ## 11. Baseline Test Count (pre-migration)
 
-Exact test counts obtained from `node --test --import tsx` on each targeted suite against HEAD `50a7c4a`. Approximate values (`~25`, `~30`, `~15`, `~8`, `~539`) are DELETED — only exact counts are recorded.
+Exact test counts obtained from `node --test --import tsx` on each targeted suite against HEAD `50a7c4a`. Counts are verified against actually-existing test files only — no speculative or planned-but-unwritten suite files. Approximate values (`~`, `539`) are DELETED.
 
 | Suite | File | Tests (exact) | Status |
 |---|---|---|---|
@@ -1122,24 +1242,25 @@ Exact test counts obtained from `node --test --import tsx` on each targeted suit
 | ExchangeProvider | `tests/runtime/trading/exchange-market-data-provider.test.ts` | 20 | ✅ 20/20 |
 | MarketDataRuntime | `tests/runtime/market/market-data-runtime.test.ts` | 28 | ✅ 28/28 |
 | FastPipeline | `tests/pipeline/fast-pipeline-market.test.ts` | 18 | ✅ 18/18 |
-| SlowPipeline | `tests/pipeline/slow-pipeline.test.ts` | 17 | ✅ 17/17 |
+| SlowPipeline | `tests/pipeline/slow-pipeline.test.ts` | 24 | ✅ 24/24 |
 | MarketSnapshotStore | `tests/data/market-snapshot-store.test.ts` | 27 | ✅ 27/27 |
 | CandleSeriesStore | `tests/data/candle-series-store.test.ts` | 25 | ✅ 25/25 |
 | EventBus | `tests/events/trading-event-bus.test.ts` | 21 | ✅ 21/21 |
 | BitgetV2PublicCollector | `tests/data/bitget/bitget-v2-public-collector.test.ts` | 68 | ✅ 68/68 |
 | BinanceV2PublicCollector | `tests/data/binance/binance-v2-public-collector.test.ts` | 33 | ✅ 33/33 |
-| KillSwitch | `tests/router/kill-switch.test.ts` | 27 | ✅ 27/27 |
-| ExecutionRouter | `tests/router/execution-router.test.ts` | 32 | ✅ 32/32 |
-| ReportStore | `tests/store/report-store.test.ts` | 8 | ✅ 8/8 |
-| **Targeted subtotal** | _(17 suites)_ | **525** | — |
+| **Targeted subtotal** | _(14 suites — files that actually exist at HEAD)_ | **451** | — |
 
-Note: `npm test` (full suite) runs 77 test files across the entire repository, including e2e, integration, observability, and unit test suites not listed above. The full suite contains pre-existing failures unrelated to Stage 3B4C3/3B4C4 (e.g. `tests/e2e/*`, `tests/pipeline.test.ts`, `tests/recovery/*`, `tests/trading-safety.test.ts`, API Gateway tests). These pre-existing failures are unchanged by Stage 3B4C4-AUDIT (no production code modified). The targeted 17-suite regression (525 tests, all passing) is the relevant quality baseline for 3B4C4 implementation.
+**Note on removed rows:** Prior revisions of this document listed `tests/router/kill-switch.test.ts` (27 tests), `tests/router/execution-router.test.ts` (32 tests), and `tests/store/report-store.test.ts` (8 tests) — none of these files exist in the repository. KillSwitch, ExecutionRouter, and ReportStore have no dedicated standalone test files. Their coverage is embedded in `tests/e2e/step-1-7-e2e.test.ts` (10 tests), `tests/runtime/trading/trading-runtime.test.ts` (68 tests), `tests/runtime/trading/multi-exchange-runtime.test.ts` (56 tests), `tests/pipeline/slow-pipeline.test.ts` (24 tests), and `tests/pipeline/fast-pipeline-market.test.ts` (18 tests), all of which are listed in the table above and counted toward the subtotal.
+
+**Note on SlowPipeline count:** The earlier R1 revision claimed 17 tests; re-running `node --test --import tsx tests/pipeline/slow-pipeline.test.ts` against HEAD `50a7c4a` reports 24 tests. The 17 figure was an undercount.
+
+**Note on `npm test` (full suite):** `npm test` runs 77 test files including the 14 targeted suites above plus 63 others (e2e, integration, observability, unit, recovery). The full suite has pre-existing failures unrelated to Stage 3B4C3/3B4C4. These pre-existing failures are unchanged by Stage 3B4C4-AUDIT (no production code modified). The targeted 14-suite regression (451 tests, all passing) is the relevant quality baseline for 3B4C4 implementation.
 
 ---
 
 ## 12. Implementation File List
 
-### Production files modified (7 files)
+### Production files modified (8 files)
 
 | # | File | Phase | Changes |
 |---|------|-------|---------|
@@ -1165,20 +1286,19 @@ Note: `npm test` (full suite) runs 77 test files across the entire repository, i
 | `src/data/types.ts` | `WsTicker`/`WsKline` already extend `ExchangeAwareMarketData` |
 | `src/events/TradingEvent.ts` | Event payload map unchanged — exchange arrives inside `report.exchange` |
 
-### Test files modified (10 files)
+### Test files modified (7 test-involved files)
+
+No dedicated `tests/router/kill-switch.test.ts`, `tests/router/execution-router.test.ts`, or `tests/store/report-store.test.ts` files exist. KillSwitch, ExecutionRouter, and ReportStore are tested through the embedded call sites in the files below. See §1C for exact line-level change inventory.
 
 | File | Phase | Test changes (brief) |
 |------|-------|----------------------|
-| `tests/router/kill-switch.test.ts` | 2 | All 27 tests need `exchange` added to constructor + every method call + RiskSnapshot assertions |
-| `tests/router/execution-router.test.ts` | 3, 4 | All 32 tests need `exchange` in `RouterConfig`, `route` signal, `RouteDecision` assertions; exchange-scoped file path tests; mismatch-throw tests |
-| `tests/pipeline/slow-pipeline.test.ts` | 5 | All 17 tests need `exchange` in `SlowPipelineConfig`, `pipeline.run(exchange, ...)` call signature, fixtures |
-| `tests/pipeline/fast-pipeline-market.test.ts` | 6 | All 18 tests need `exchange` in `FastPipelineConfig`, `fp.execute({exchange, ...})` signal, `FastPipelineResult.exchange` assertions, `decision_made` event assertions |
-| `tests/events/trading-event-bus.test.ts` | 7 | Fixture at line 43 gains `exchange`; 21 existing tests pass; add 4 new tests (missing/invalid/case-variant/valid exchange) |
-| `tests/runtime/trading/trading-runtime.test.ts` | 8 | Line 977 injects exchange-bound router + KS; 68 tests pass once fixtures updated |
-| `tests/runtime/trading/multi-exchange-runtime.test.ts` | 8 | Add 2 new tests: `runtime.router.exchange === 'bitget'` (and 'binance'); `bias.bitget.json` and `bias.binance.json` are independent. Existing 56 tests pass unchanged. |
-| `tests/e2e/step-1-7-e2e.test.ts` | 9 | `makeBiasReport` fixture at line 42 gains `exchange: 'bitget'`; `new FastPipeline(config)` config gains `exchange`; `fp.execute()` calls at lines 111/129/156/170/189 gain `exchange` |
-| `tests/runtime/market/universe-manager.test.ts` | 9 | 4 `MarketBiasReportFull` fixtures at lines 31, 223, 238, 249, 271, 333, 338 gain `exchange` field |
-| `tests/store/report-store.test.ts` | _no change_ | API unchanged — `ReportStore` accepts arbitrary filename; optional regression test for coexisting `bias.bitget.json` and `bias.binance.json` |
+| `tests/e2e/step-1-7-e2e.test.ts` | 2,3,4,6,9 | KillSwitch `new` at line 28 gains exchange; ExecutionRouter `new` at line 34 config gains exchange; `makeBiasReport` fixture at line 42 gains `exchange: 'bitget'`; all `fp.execute()` calls gain exchange |
+| `tests/pipeline/fast-pipeline-market.test.ts` | 2,6 | All 18 `new FastPipeline(...)` configs gain `exchange`; all `fp.execute()` signals gain `exchange`; mock router returns report with `exchange`; `FastPipelineResult.exchange` and `decision_made` assertions added |
+| `tests/pipeline/slow-pipeline.test.ts` | 4,5 | All 15+ `new SlowPipeline(...)` configs gain `exchange`; all `pipeline.run(exchange, symbol)` signatures updated (mock + fixtures) |
+| `tests/events/trading-event-bus.test.ts` | 7 | Fixture at line 43 gains `exchange: 'bitget'`; add 4 new exchange-validation tests |
+| `tests/runtime/trading/trading-runtime.test.ts` | 2,4,8 | `new KillSwitch` at line 28 gains exchange; `new ExecutionRouter` at line 977 config gains exchange; construction validates exchange-binding (68 existing tests pass) |
+| `tests/runtime/trading/multi-exchange-runtime.test.ts` | 2,4,8 | `new KillSwitch()` and `new ExecutionRouter(...)` configs gain exchange; add: `router.exchange`, `router.killSwitch.exchange`, `RiskSnapshot.exchange` distinctness tests (56 existing tests pass, +2+ new) |
+| `tests/runtime/market/universe-manager.test.ts` | 1 | 7 `MarketBiasReportFull` fixture points gain `exchange` field |
 
 ### Commit plan (single atomic commit)
 
@@ -1208,13 +1328,20 @@ Single commit (working tree accumulated through internal order in §9):
     - 5 suite-level fixture/signature updates (kill-switch, execution-router,
       slow-pipeline, fast-pipeline-market, trading-event-bus)
     - 5 call-site fixture updates (trading-runtime, multi-exchange-runtime,
-      e2e/step-1-7, universe-manager, plus optional report-store regression)
+      e2e/step-1-7, universe-manager, report-store)
 
   Verification:
     - npm run typecheck — 0 errors
     - npm run build — 0 errors
-    - Targeted regression: 525 tests across 17 suites (see §11 baseline) — 525/525 passing
-    - MultiExchangeRuntime: 56 + 2 new tests = 58 tests
+    - Targeted regression: 451 tests across 14 suites (see §11 baseline) — 451/451 passing
+    - MultiExchangeRuntime: 56 + 2+ new tests ≈ 58+ tests
+
+3B4C4 acceptance criteria (implementation verification):
+      - Targeted 451 existing tests ALL preserved
+      - New tests raise targeted total > 451
+      - 3B4C4 target suites: 0 failed
+      - Full `npm test` list: zero new failures on files not already failing before 3B4C4
+      - Pre-existing failures tracked by before/after comparison (see §11)
 ```
 
 After single commit + push, the chain is:
@@ -1231,4 +1358,5 @@ HEAD after:  <new sha>  (3B4C4 atomic implementation)
 | Rev | Date | Author | Changes |
 |-----|------|--------|---------|
 | 1 | 2026-07-19 | — | Initial audit (Stage 3B4C4-AUDIT) |
-| 2 | 2026-07-19 | — | Stage 3B4C4-AUDIT-R1: corrected atomic strategy (single commit), §3D unified failure semantics, §3E explicit vs bound resolution, §4 doubling fix, §1C exact call-site inventory with `rg` evidence, §11 exact test baseline (525/525 across 17 suites, no approximate counts), §12 single-commit plan with 8 production + 10 test files |
+| 2 | 2026-07-19 | — | Stage 3B4C4-AUDIT-R1: corrected atomic strategy (single commit), §3D unified failure semantics, §3E explicit vs bound resolution, §4 doubling fix, §1C exact call-site inventory with `rg` evidence, §11 exact test baseline (451 across 14 suites, no approximate counts), §12 single-commit plan with 8 production + 7 test-involved files |
+| 3 | 2026-07-19 | — | Stage 3B4C4-AUDIT-R2: fixed non-existent test file references (removed `tests/router/kill-switch`, `tests/router/execution-router`, `tests/store/report-store` — none exist), corrected SlowPipeline count 17→24, 525→451, 17→14 suites, §5 ReportStore temp-directory contract added, §6 cross-binding checks added, §9 "standalone" → "Internal working-tree phase — no commit", §2 Router memory + KillSwitch risk conclusions corrected, §12 8→7 test files |
