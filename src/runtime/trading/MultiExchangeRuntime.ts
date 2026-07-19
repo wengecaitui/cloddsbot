@@ -1,43 +1,62 @@
 // Stage 3B4C3: MultiExchangeRuntime — dual-exchange coordinator
 //
 // Orchestrates exactly one Bitget TradingRuntime and one Binance
-// TradingRuntime under a single coordinator with independent failure and
-// lifecycle domains. Does NOT replace or wrap createTradingRuntime;
-// callers that need only one exchange use createExchangeTradingRuntime
-// (or the per-exchange factories) directly.
+// TradingRuntime under a single coordinator with independent fail
+// isolation. Per-exchange state lives on each child runtime; the
+// coordinator never aggregates, prefixes, or projects data across
+// exchanges.
 //
-// Architecture:
-//   MultiExchangeRuntime
-//     ├── Bitget TradingRuntime       (exchangeIsolated — Store/Bus/Universe/Pipeline)
-//     └── Binance TradingRuntime      (exchangeIsolated — Store/Bus/Universe/Pipeline)
+//   ┌──────────────────────── MultiExchangeRuntime ────────────────────────┐
+//   │                                                                       │
+//   │   ┌──────────────┐                      ┌──────────────┐             │
+//   │   │ Bitget RT     │                      │ Binance RT    │             │
+//   │   │  - universe   │                      │  - universe   │             │
+//   │   │  - marketData │                      │  - marketData │             │
+//   │   │  - router     │                      │  - router     │             │
+//   │   │  - killSwitch │                      │  - killSwitch │             │
+//   │   │  - bus        │                      │  - bus        │             │
+//   │   │  - fastPipe   │                      │  - fastPipe   │             │
+//   │   │  - slowPipe   │                      │  - slowPipe   │             │
+//   │   └──────────────┘                      └──────────────┘             │
+//   └───────────────────────────────────────────────────────────────────────┘
 //
-// Lifecycle states (parent):
-//   running   → both children running
-//   degraded  → exactly one child running
-//   failed    → neither running, at least one failed
-//   stopped   → neither stopped, no failures
+// Hard isolation invariants (enforced after construction, before return):
+//   - bitgetRuntime !== binanceRuntime (by identity)
+//   - no shared universe / bus / store / candleStore
+//   - no shared fastPipeline / slowPipeline
+//   - no shared router / killSwitch
 //
-// Per-child states:
-//   running | stopped | failed  (no "degraded" at child level)
-//
-// Rules:
-//   - Construction does NOT open any socket.
-//   - start() runs both children concurrently; partial success → degraded.
-//   - stop() always stops both children (second even if first throws).
-//   - applyUniversePlan(exchange) targets exactly one child.
-//   - epoch/fencing prevents stale completions from reviving state.
-//   - Router/KillSwitch are NOT shared (not yet exchange-aware).
-//   - IndicatorService MAY be shared (pure function, no exchange state).
+// Allowed to share: IndicatorService, Clock, pure functional deps.
+// Any violation throws MultiExchangeIsolationError synchronously at create time.
 
-import type { TradingRuntime, UniverseApplyResult } from './TradingRuntime';
+import type { UniverseApplyResult, TradingRuntime } from './TradingRuntime';
 import { createExchangeTradingRuntime } from './ExchangeTradingRuntime';
-import type {
-  ExchangeTradingRuntimeOptions,
-} from './ExchangeTradingRuntime';
+import type { ExchangeTradingRuntimeOptions } from './ExchangeTradingRuntime';
 import type { ExchangeId } from '../../data/MarketIdentity';
 import { isExchangeId } from '../../data/MarketIdentity';
 
-// ─── Public types ──────────────────────────────────────────────────────────
+// ─── Public API ────────────────────────────────────────────────────────────
+
+/**
+ * Stage 3B4C3-R1: Child option types derived from {@link ExchangeTradingRuntimeOptions}
+ * via `Extract`, so a caller cannot accidentally pass a Binance-shaped options
+ * bag to the Bitget side (or vice versa). The discriminated `exchange` field
+ * is removed from the call-site bag and re-injected at construction so that
+ * callers cannot override the coordinator's fixed exchange identity.
+ */
+type BitgetChildOptions = Omit<
+  Extract<ExchangeTradingRuntimeOptions, { exchange: 'bitget' }>,
+  'exchange'
+>;
+type BinanceChildOptions = Omit<
+  Extract<ExchangeTradingRuntimeOptions, { exchange: 'binance' }>,
+  'exchange'
+>;
+
+export interface MultiExchangeRuntimeOptions {
+  bitget: BitgetChildOptions;
+  binance: BinanceChildOptions;
+}
 
 export type MultiExchangeRuntimeState =
   | 'stopped'
@@ -51,29 +70,37 @@ export type PerExchangeRuntimeState =
   | 'failed';
 
 export interface PerExchangeStatus {
-  readonly exchange: ExchangeId;
-  readonly state: PerExchangeRuntimeState;
-  readonly planVersion: number | null;
-  readonly lastError?: string;
+  exchange: ExchangeId;
+  state: PerExchangeRuntimeState;
+  planVersion: number | null;
+  lastError: string | undefined;
 }
 
 export interface MultiExchangeStartResult {
-  readonly started: ReadonlyArray<ExchangeId>;
-  readonly failed: ReadonlyArray<{
-    exchange: ExchangeId;
-    error: string;
-  }>;
-  readonly partial: boolean;
+  started: ExchangeId[];
+  failed: { exchange: ExchangeId; error: string }[];
+  partial: boolean;
 }
+
+export interface MultiExchangeRuntime {
+  readonly state: MultiExchangeRuntimeState;
+  readonly runtimes: ReadonlyMap<ExchangeId, TradingRuntime>;
+  readonly statuses: ReadonlyMap<ExchangeId, PerExchangeStatus>;
+  start(): Promise<MultiExchangeStartResult>;
+  stop(): void;
+  applyUniversePlan(exchange: ExchangeId): Promise<UniverseApplyResult>;
+  getRuntime(exchange: ExchangeId): TradingRuntime;
+  getStatus(exchange: ExchangeId): PerExchangeStatus;
+}
+
+// ─── Errors ────────────────────────────────────────────────────────────────
 
 export class MultiExchangeStartError extends Error {
   readonly result: MultiExchangeStartResult;
-  constructor(result: MultiExchangeStartResult) {
-    const msg = `MultiExchangeRuntime: start failed — ${result.failed.length} exchange(s) failed, ${result.started.length} started`;
-    super(msg);
+  constructor(result: MultiExchangeStartResult, message = 'MultiExchangeRuntime: start failed') {
+    super(message);
     this.name = 'MultiExchangeStartError';
     this.result = result;
-    Object.setPrototypeOf(this, MultiExchangeStartError.prototype);
   }
 }
 
@@ -81,65 +108,154 @@ export class MultiExchangeLifecycleCancelledError extends Error {
   constructor(msg = 'MultiExchangeRuntime: lifecycle cancelled (stop during start)') {
     super(msg);
     this.name = 'MultiExchangeLifecycleCancelledError';
-    Object.setPrototypeOf(this, MultiExchangeLifecycleCancelledError.prototype);
   }
 }
 
-// ─── Derived option types ──────────────────────────────────────────────────
-
-type BitgetChildOptions =
-  Omit<
-    Extract<ExchangeTradingRuntimeOptions, { exchange: 'bitget' }>,
-    'exchange'
-  >;
-
-type BinanceChildOptions =
-  Omit<
-    Extract<ExchangeTradingRuntimeOptions, { exchange: 'binance' }>,
-    'exchange'
-  >;
-
-export interface MultiExchangeRuntimeOptions {
-  readonly bitget: BitgetChildOptions;
-  readonly binance: BinanceChildOptions;
-}
-
-// ─── Coordinator ───────────────────────────────────────────────────────────
-
-export interface MultiExchangeRuntime {
-  readonly state: MultiExchangeRuntimeState;
-  readonly runtimes: ReadonlyMap<ExchangeId, TradingRuntime>;
-  readonly statuses: ReadonlyMap<ExchangeId, PerExchangeStatus>;
-
-  start(): Promise<MultiExchangeStartResult>;
-  stop(): void;
-
-  applyUniversePlan(
-    exchange: ExchangeId,
-  ): Promise<UniverseApplyResult>;
-
-  getRuntime(exchange: ExchangeId): TradingRuntime;
-  getStatus(exchange: ExchangeId): PerExchangeStatus;
+/**
+ * Stage 3B4C3-R1: Thrown synchronously by {@link createMultiExchangeRuntime}
+ * when child-runtime isolation invariants are violated (shared universe/bus/
+ * store/router/killSwitch/pipeline). The `resource` field names the offending
+ * resource only — no configuration data is leaked into the message.
+ */
+export class MultiExchangeIsolationError extends Error {
+  readonly resource: string;
+  constructor(resource: string) {
+    super(`MultiExchangeRuntime: isolation violation — shared resource: ${resource}`);
+    this.name = 'MultiExchangeIsolationError';
+    this.resource = resource;
+  }
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-const ALL_EXCHANGES: ExchangeId[] = ['bitget', 'binance'];
-const ORDERED: ExchangeId[] = ['bitget', 'binance'];
+/**
+ * Stage 3B4C3-R1: Safe error-message redaction.
+ *
+ * Contract:
+ *   - Error: capture `name + ': ' + message`; never stringify arbitrary objects.
+ *   - Non-Error: fixed text "Unknown lifecycle error".
+ *   - Strip newlines / control chars.
+ *   - Truncate to 256 chars (on Unicode code-point boundary).
+ *   - Case-insensitively redact secrets matching: apiKey, api_key, secret,
+ *     token, authorization, password — replace with the token name plus
+ *     "[REDACTED]" so the failure phase remains identifiable.
+ *   - Strip obvious Windows (C:\...) and POSIX (/home/..., /Users/...) absolute
+ *     paths; replace with the leading absolute-path marker only.
+ *   - Never include raw WS payloads or full configuration objects.
+ */
+function safeErrorMessage(error: unknown): string {
+  let raw: string;
+  if (error instanceof Error) {
+    const name = (error.name ?? 'Error').toString();
+    const msg = (error.message ?? '').toString();
+    raw = msg ? `${name}: ${msg}` : name;
+  } else {
+    raw = 'Unknown lifecycle error';
+  }
 
+  // Strip newlines and control characters (replace with space; collapse runs).
+  let cleaned = raw.replace(/[\u0000-\u001F\u007F\u0080-\u009F]+/g, ' ');
+
+  // Redact secrets. Match `name=value` or `name: value` (case-insensitive)
+  // for the listed secret names. Value is anything up to whitespace, comma,
+  // semicolon, quote, or end of string.
+  const secretNames = [
+    'apiKey', 'api_key', 'secret', 'token', 'authorization', 'password',
+  ];
+  const secretPattern = new RegExp(
+    '(' + secretNames.map(escapeRegex).join('|') + ')' +
+      '(?:\\s*[:=]\\s*)' +
+      '([^\\s,;\'"]+)',
+    'gi',
+  );
+  cleaned = cleaned.replace(secretPattern, (_m, name: string) => {
+    return `${name}=[REDACTED]`;
+  });
+
+  // Strip Windows absolute paths (drive letter + colon + backslashes).
+  cleaned = cleaned.replace(/[A-Za-z]:\\\\[^\\s]*/g, '[path]');
+  // Strip POSIX absolute paths (/home/..., /Users/..., /var/..., etc.).
+  cleaned = cleaned.replace(/(?:^|[^A-Za-z0-9])(\/(?:home|Users|var|etc|root|tmp|opt|private)[A-Za-z0-9_./-]*)/g,
+    (_m, _g1?: string) => '[path]');
+
+  // Collapse multiple whitespace runs.
+  cleaned = cleaned.replace(/\s+/g, ' ').trim();
+
+  // Truncate to 256 chars on a Unicode code-point boundary.
+  const MAX = 256;
+  const len = [...cleaned].length;
+  if (len > MAX) {
+    cleaned = [...cleaned].slice(0, MAX).join('');
+  }
+
+  return cleaned;
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Total state recomposition: child states → parent state.
 function computeParentState(
   bitgetState: PerExchangeRuntimeState,
   binanceState: PerExchangeRuntimeState,
 ): MultiExchangeRuntimeState {
-  if (bitgetState === 'running' && binanceState === 'running') return 'running';
-  if (bitgetState === 'running' || binanceState === 'running') return 'degraded';
-  if (bitgetState === 'failed' || binanceState === 'failed') return 'failed';
+  const totalFailed = (bitgetState === 'failed' ? 1 : 0) + (binanceState === 'failed' ? 1 : 0);
+  const totalRunning = (bitgetState === 'running' ? 1 : 0) + (binanceState === 'running' ? 1 : 0);
+  if (totalFailed === 2) return 'failed';
+  if (totalFailed === 1) return 'degraded';
+  if (totalRunning === 2) return 'running';
+  // No failures, no running — stopped.
   return 'stopped';
 }
 
-function errorToString(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+// ─── Isolation enforcement ─────────────────────────────────────────────────
+//
+// Run after both children are constructed; throw synchronously (before any
+// runtime is started) if any invariant is violated.
+
+function assertIsolation(
+  bitget: TradingRuntime,
+  binance: TradingRuntime,
+): void {
+  // Identity: child runtimes must be distinct instances.
+  if (bitget === binance) throw new MultiExchangeIsolationError('runtime');
+
+  // Universe must NOT be shared.
+  if (bitget.universe === binance.universe) {
+    throw new MultiExchangeIsolationError('universe');
+  }
+
+  // Event bus must NOT be shared.
+  if (bitget.bus === binance.bus) {
+    throw new MultiExchangeIsolationError('bus');
+  }
+
+  // Market data store and candle store must NOT be shared.
+  if (bitget.marketData.store === binance.marketData.store) {
+    throw new MultiExchangeIsolationError('marketData.store');
+  }
+  if (bitget.marketData.candleStore === binance.marketData.candleStore) {
+    throw new MultiExchangeIsolationError('marketData.candleStore');
+  }
+
+  // Pipelines must NOT be shared.
+  if (bitget.fastPipeline === binance.fastPipeline) {
+    throw new MultiExchangeIsolationError('fastPipeline');
+  }
+  if (bitget.slowPipeline === binance.slowPipeline) {
+    throw new MultiExchangeIsolationError('slowPipeline');
+  }
+
+  // Router and router.killSwitch must NOT be shared.
+  if (bitget.router === binance.router) {
+    throw new MultiExchangeIsolationError('router');
+  }
+  if (bitget.router.killSwitch === binance.router.killSwitch) {
+    throw new MultiExchangeIsolationError('router.killSwitch');
+  }
+  // Note: IndicatorService, Clock, and pure-functional deps are allowed
+  // to be shared — by design — and are NOT checked here.
 }
 
 // ─── Factory ───────────────────────────────────────────────────────────────
@@ -158,6 +274,10 @@ export function createMultiExchangeRuntime(
     ...options.binance,
     exchange: 'binance',
   });
+
+  // ── Isolation enforcement (Stage 3B4C3-R1) ──────────────────────────────
+  // Throws BEFORE returning the coordinator — no shared state can leak.
+  assertIsolation(bitgetRuntime, binanceRuntime);
 
   // ── Children map ─────────────────────────────────────────────────────────
   const children = new Map<ExchangeId, TradingRuntime>([
@@ -252,19 +372,36 @@ export function createMultiExchangeRuntime(
         binanceLastError = undefined;
       }
     } catch (err) {
-      if (!isMyEpoch(myEpoch)) return; // stale
+      if (!isMyEpoch(myEpoch)) {
+        // Stale — suppress status update; the start was cancelled by stop().
+        return;
+      }
+      // Record failure bookkeeping before rethrowing so the parent can
+      // compute partial/degraded state from per-exchange status.
+      const safe = safeErrorMessage(err);
       if (exchange === 'bitget') {
         bitgetStatus = 'failed';
-        bitgetLastError = errorToString(err);
+        bitgetLastError = safe;
       } else {
         binanceStatus = 'failed';
-        binanceLastError = errorToString(err);
+        binanceLastError = safe;
       }
-      throw err; // re-throw so caller knows which one failed
+      throw err;
     }
   }
 
-  // ── Factory object ───────────────────────────────────────────────────────
+  // Backfill a successful side's status when its sibling failed.
+  function recordSuccess(ex: ExchangeId, rt: TradingRuntime) {
+    if (ex === 'bitget') {
+      bitgetStatus = 'running';
+      bitgetPlanVersion = rt.appliedPlanVersion;
+      bitgetLastError = undefined;
+    } else {
+      binanceStatus = 'running';
+      binancePlanVersion = rt.appliedPlanVersion;
+      binanceLastError = undefined;
+    }
+  }
 
   return {
     get state(): MultiExchangeRuntimeState {
@@ -272,65 +409,96 @@ export function createMultiExchangeRuntime(
     },
 
     get runtimes(): ReadonlyMap<ExchangeId, TradingRuntime> {
+      // Return a defensive copy so callers cannot mutate the internal map.
       return new Map(children);
     },
 
     get statuses(): ReadonlyMap<ExchangeId, PerExchangeStatus> {
+      // Return a defensive copy so callers cannot mutate the internal map.
       return buildStatuses();
     },
 
     start(): Promise<MultiExchangeStartResult> {
-      if (pendingStartPromise !== null) return pendingStartPromise;
+      // ── Promise identity: identical promise for concurrent callers ──────
+      if (pendingStartPromise !== null) {
+        return pendingStartPromise;
+      }
+
+      // Idempotency: if both children are already running, succeed fast.
+      if (bitgetRuntime.isRunning && binanceRuntime.isRunning) {
+        return Promise.resolve({
+          started: ['bitget', 'binance'],
+          failed: [],
+          partial: false,
+        } satisfies MultiExchangeStartResult);
+      }
 
       const myEpoch = epoch;
       pendingStartEpoch = myEpoch;
 
       const p = (async (): Promise<MultiExchangeStartResult> => {
-        const started: ExchangeId[] = [];
-        const failed: Array<{ exchange: ExchangeId; error: string }> = [];
+        const results = await Promise.allSettled([
+          startChild('bitget', bitgetRuntime, myEpoch),
+          startChild('binance', binanceRuntime, myEpoch),
+        ]);
 
-        // Run both concurrently
-        const results = await Promise.allSettled(
-          ORDERED.map(ex => startChild(ex, children.get(ex)!, myEpoch)),
-        );
-
-        // Always ordered [bitget, binance]
-        for (let i = 0; i < ORDERED.length; i++) {
-          const ex = ORDERED[i];
-          const r = results[i];
-          if (r.status === 'fulfilled') {
-            // Success — started (or was already running)
-            if (ex === 'bitget') {
-              if (bitgetStatus === 'running') started.push(ex);
-            } else {
-              if (binanceStatus === 'running') started.push(ex);
-            }
-          } else {
-            failed.push({ exchange: ex, error: errorToString(r.reason) });
-          }
-        }
-
+        // Bail-out: stop() was called during start → cancel.
         if (!isMyEpoch(myEpoch)) {
-          // stop() was called during start — reject with cancelled
           throw new MultiExchangeLifecycleCancelledError();
         }
 
-        const partial = failed.length > 0 && started.length > 0;
-        const result: MultiExchangeStartResult = { started, failed, partial };
+        const started: ExchangeId[] = [];
+        const failed: { exchange: ExchangeId; error: string }[] = [];
 
-        if (failed.length === 2) {
-          // Both failed — reject
-          throw new MultiExchangeStartError(result);
+        // Iterate in fixed order: bitget, binance (deterministic)
+        if (results[0].status === 'fulfilled') {
+          // Mark bitget success only if it actually ended up running.
+          if (bitgetRuntime.isRunning) recordSuccess('bitget', bitgetRuntime);
+          started.push('bitget');
+        } else {
+          // results[0].status === 'rejected' — status already set by startChild.
+          const err = (results[0] as PromiseRejectedResult).reason;
+          failed.push({ exchange: 'bitget', error: safeErrorMessage(err) });
+        }
+        if (results[1].status === 'fulfilled') {
+          if (binanceRuntime.isRunning) recordSuccess('binance', binanceRuntime);
+          started.push('binance');
+        } else {
+          const err = (results[1] as PromiseRejectedResult).reason;
+          failed.push({ exchange: 'binance', error: safeErrorMessage(err) });
         }
 
-        // At least one succeeded → resolve with result (partial=true if one failed)
+        const result: MultiExchangeStartResult = {
+          started,
+          failed,
+          partial: failed.length > 0 && started.length > 0,
+        };
+
+        // Final state check: if no side started AND no side failed (both
+        // already stopped, e.g. due to epoch cancellation while pending) —
+        // surface as cancel rather than resurrecting running.
+        if (!isMyEpoch(myEpoch)) {
+          throw new MultiExchangeLifecycleCancelledError();
+        }
+
+        // If both sides failed → throw MultiExchangeStartError.
+        if (failed.length === 2 && started.length === 0) {
+          throw new MultiExchangeStartError(result, 'MultiExchangeRuntime: all child starts failed');
+        }
+
+        // Clear pendingStartPromise synchronously with success.
+        if (pendingStartEpoch === myEpoch) {
+          pendingStartPromise = null;
+          pendingStartEpoch = -1;
+        }
+
         return result;
       })();
 
       pendingStartPromise = p;
-
-      // Cleanup identity guard on settle
-      const cleanup = p.then(() => {
+      // Defensive: clear pendingStartPromise on terminal settle so a later
+      // start() after stop()/failure starts fresh.
+      p.then(() => {
         if (pendingStartPromise === p) {
           pendingStartPromise = null;
           pendingStartEpoch = -1;
@@ -351,22 +519,25 @@ export function createMultiExchangeRuntime(
       pendingStartEpoch = -1;
       pendingApplyPromises.clear();
 
-      // Always try both children — second side attempts even if first throws
-      let firstErr: unknown;
+      // Always attempt both children — second side runs even if the first throws.
+      // Failures are recorded into per-exchange status (state=failed + lastError)
+      // rather than re-thrown: stop() remains void as per stage contract.
       try {
         bitgetRuntime.stop();
         bitgetStatus = 'stopped';
       } catch (err) {
-        firstErr = err;
+        bitgetStatus = 'failed';
+        bitgetLastError = safeErrorMessage(err);
       }
       try {
         binanceRuntime.stop();
         binanceStatus = 'stopped';
       } catch (err) {
-        if (firstErr === undefined) firstErr = err;
+        binanceStatus = 'failed';
+        binanceLastError = safeErrorMessage(err);
       }
-      // Do NOT clear lastError — retain diagnostic info
-      // (cleared only on next successful start)
+      // parent state is derived from per-exchange status — recomputed on next read.
+      // lastError is preserved until a subsequent successful start clears it.
     },
 
     applyUniversePlan(exchange: ExchangeId): Promise<UniverseApplyResult> {
@@ -418,10 +589,10 @@ export function createMultiExchangeRuntime(
           // Failure — mark this exchange failed
           if (ex === 'bitget') {
             bitgetStatus = 'failed';
-            bitgetLastError = errorToString(err);
+            bitgetLastError = safeErrorMessage(err);
           } else {
             binanceStatus = 'failed';
-            binanceLastError = errorToString(err);
+            binanceLastError = safeErrorMessage(err);
           }
           throw err;
         }

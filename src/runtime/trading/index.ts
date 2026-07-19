@@ -56,4 +56,5 @@ export {
   createMultiExchangeRuntime,
   MultiExchangeStartError,
   MultiExchangeLifecycleCancelledError,
+  MultiExchangeIsolationError,
 } from './MultiExchangeRuntime';
