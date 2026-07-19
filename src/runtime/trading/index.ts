@@ -42,3 +42,18 @@ export type {
 export {
   createExchangeTradingRuntime,
 } from './ExchangeTradingRuntime';
+
+// Stage 3B4C3: Multi-exchange Runtime coordinator
+export type {
+  MultiExchangeRuntime,
+  MultiExchangeRuntimeOptions,
+  MultiExchangeRuntimeState,
+  PerExchangeRuntimeState,
+  PerExchangeStatus,
+  MultiExchangeStartResult,
+} from './MultiExchangeRuntime';
+export {
+  createMultiExchangeRuntime,
+  MultiExchangeStartError,
+  MultiExchangeLifecycleCancelledError,
+} from './MultiExchangeRuntime';
