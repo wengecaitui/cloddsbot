@@ -19,6 +19,9 @@ import { createUniverseManager } from '../../../src/runtime/market/UniverseManag
 import type { UniverseManager } from '../../../src/runtime/market/UniverseManager';
 import { createSymbolRegistry } from '../../../src/runtime/market/SymbolFormat';
 import type { ExchangeId } from '../../../src/data/MarketIdentity';
+import { createTradingEventBus } from '../../../src/events/TradingEventBus';
+import { ExecutionRouter } from '../../../src/router/ExecutionRouter';
+import { KillSwitch } from '../../../src/router/KillSwitch';
 
 // ─── Fake Scheduler (deterministic timer) ───────────────────────────────────
 
@@ -1067,45 +1070,22 @@ test('35. throws MultiExchangeIsolationError when universe is shared', () => {
   });
 });
 
-// 36. Isolation error thrown when bus is really shared through public API
-test('36. throws MultiExchangeIsolationError when bus is shared via public API', () => {
-  // Bus is created internally by createTradingRuntime. To share it we
-  // must construct both children normally, then reach inside and swap one
-  // child's bus reference before the coordinator's isolation check runs.
-  // The cleanest way: build both child option bags, then override the
-  // bus property on one runtime so both point to the same instance.
-  //
-  // Because createMultiExchangeRuntime creates both children internally,
-  // we can't pre-patch. Instead we assert that:
-  //   a) Normal construction never triggers the check (null test).
-  //   b) The `MultiExchangeIsolationError` class with `resource='bus'`
-  //      matches the check used inside `assertIsolation` (cf. line 229).
-  const fB = new FakeWSFactory();
-  const sB = new FakeScheduler();
-  const fN = new FakeWSFactory();
-  const sN = new FakeScheduler();
-  const multi = createMultiExchangeRuntime({
-    bitget: bitgetOpts(makeUniverse(), fB, sB),
-    binance: binanceOpts(makeUniverse(), fN, sN),
-  });
-  // Normal: buses are distinct
-  assert.notEqual(multi.getRuntime('bitget').bus, multi.getRuntime('binance').bus);
+// 36. Real shared bus rejected — inject same bus via TradingRuntimeOptions
+test('36. real shared bus rejected by createMultiExchangeRuntime', () => {
+  const sharedBus = createTradingEventBus();
+  const bOpts = bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
+  const nOpts = binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
+  bOpts.runtime = { ...bOpts.runtime, bus: sharedBus };
+  nOpts.runtime = { ...nOpts.runtime, bus: sharedBus };
 
-  // Now simulate a shared-bus construction by replacing one child's bus.
-  // In real code the check inside assertIsolation would fire; we verify
-  // the error class contract is correct.
-  const err = new MultiExchangeIsolationError('bus');
-  assert.equal(err.resource, 'bus');
-  assert.equal(err.name, 'MultiExchangeIsolationError');
-  assert.ok(err.message.includes('isolation violation'));
-  assert.ok(err.message.includes('bus'));
-
-  // Regression: a second normal construction must still work
-  const multi2 = createMultiExchangeRuntime({
-    bitget: bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()),
-    binance: binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()),
-  });
-  assert.ok(multi2);
+  assert.throws(
+    () => createMultiExchangeRuntime({ bitget: bOpts as any, binance: nOpts as any }),
+    (err: unknown) => {
+      assert.ok(err instanceof MultiExchangeIsolationError);
+      assert.equal((err as MultiExchangeIsolationError).resource, 'bus');
+      return true;
+    },
+  );
 });
 
 // 37. Parent state truth table: bitget stop throws, binance succeeds → parent failed
@@ -1544,24 +1524,38 @@ test('51. both stop fail -> parent failed', async () => {
   assert.equal(multi.state, 'failed');
 });
 
-// 52. Shared router via KillingSwitch → isolation violation
-test('52. shared kill switch through routerConfig -> isolation violation', () => {
-  // KillSwitch can be injected via routerConfig.killSwitch. If both children
-  // receive the same instance, assertIsolation must fire.
-  const sharedKs = { name: 'shared-ks' }; // fake KillSwitch-like object
-  // We need two separate routerConfigs that each inject the same killSwitch.
-  // Test verifies that passing the same routerConfig object to both is caught.
-  // (Since router is created internally, this can't be tested via public API —
-  //  but verify that a duplicate reference insertion would trigger.)
-  // Full E2E test: build a single KS, inject via bitget/binance routerConfig.
-  const cfg = { killSwitch: sharedKs };
-  // Both child opts share the same killSwitch through routerConfig
-  assert.throws(() => {
-    createMultiExchangeRuntime({
-      bitget: { ...bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()), runtime: { ...bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()).runtime, routerConfig: cfg } } as any,
-      binance: { ...binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()), runtime: { ...binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()).runtime, routerConfig: cfg } } as any,
-    });
-  }, /isolation violation.*kill.?switch/i);
+// 52. Real shared KillSwitch via distinct ExecutionRouters
+test('52. real shared kill switch via distinct routers', () => {
+  const sharedKs = new KillSwitch();
+  const bitgetRouter = new ExecutionRouter({
+    fastPathTimeoutSec: 1.5,
+    maxBiasReportAgeHours: 2,
+    killSwitch: sharedKs,
+  });
+  const binanceRouter = new ExecutionRouter({
+    fastPathTimeoutSec: 1.5,
+    maxBiasReportAgeHours: 2,
+    killSwitch: sharedKs,
+  });
+  // Routers themselves must be distinct
+  assert.notEqual(bitgetRouter, binanceRouter);
+
+  const bOpts = bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
+  const nOpts = binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
+  // rm routerConfig so runtime.router takes priority
+  delete (bOpts.runtime as any).routerConfig;
+  delete (nOpts.runtime as any).routerConfig;
+  bOpts.runtime = { ...bOpts.runtime, router: bitgetRouter };
+  nOpts.runtime = { ...nOpts.runtime, router: binanceRouter };
+
+  assert.throws(
+    () => createMultiExchangeRuntime({ bitget: bOpts as any, binance: nOpts as any }),
+    (err: unknown) => {
+      assert.ok(err instanceof MultiExchangeIsolationError);
+      assert.equal((err as MultiExchangeIsolationError).resource, 'router.killSwitch');
+      return true;
+    },
+  );
 });
 
 // 53. Shared indicator service is allowed (no isolation violation)
@@ -1573,4 +1567,28 @@ test('53. shared indicator service does not trigger isolation', () => {
   });
   assert.ok(multi);
   assert.notEqual(multi.getRuntime('bitget').bus, multi.getRuntime('binance').bus);
+});
+
+// 54. Real shared router rejected — inject same ExecutionRouter via TradingRuntimeOptions
+test('54. real shared router rejected by createMultiExchangeRuntime', () => {
+  const sharedRouter = new ExecutionRouter({
+    fastPathTimeoutSec: 1.5,
+    maxBiasReportAgeHours: 2,
+    killSwitch: new KillSwitch(),
+  });
+  const bOpts = bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
+  const nOpts = binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
+  delete (bOpts.runtime as any).routerConfig;
+  delete (nOpts.runtime as any).routerConfig;
+  bOpts.runtime = { ...bOpts.runtime, router: sharedRouter };
+  nOpts.runtime = { ...nOpts.runtime, router: sharedRouter };
+
+  assert.throws(
+    () => createMultiExchangeRuntime({ bitget: bOpts as any, binance: nOpts as any }),
+    (err: unknown) => {
+      assert.ok(err instanceof MultiExchangeIsolationError);
+      assert.equal((err as MultiExchangeIsolationError).resource, 'router');
+      return true;
+    },
+  );
 });
