@@ -172,9 +172,11 @@ function safeErrorMessage(error: unknown): string {
     return `${name}=[REDACTED]`;
   });
 
-  // Strip Windows absolute paths (drive letter + colon + backslashes).
-  cleaned = cleaned.replace(/[A-Za-z]:\\\\[^\\s]*/g, '[path]');
-  // Strip POSIX absolute paths (/home/..., /Users/..., /var/..., etc.).
+  // Strip Windows absolute paths: drive letter + colon + single-backslash path.
+  // Also strip UNC paths: \\server\share\...
+  cleaned = cleaned.replace(/\b[A-Za-z]:\\[^\s"')\],;]*/g, '[path]');
+  cleaned = cleaned.replace(/\\\\[A-Za-z0-9._-]+\\[A-Za-z0-9._-]+(?:\.[A-Za-z0-9]+)*(?:\\[A-Za-z0-9._-]+)*/g, '[path]');
+  // Strip POSIX absolute paths (/home/..., /Users/..., /var/..., /opt/..., etc.).
   cleaned = cleaned.replace(/(?:^|[^A-Za-z0-9])(\/(?:home|Users|var|etc|root|tmp|opt|private)[A-Za-z0-9_./-]*)/g,
     (_m, _g1?: string) => '[path]');
 
@@ -196,16 +198,22 @@ function escapeRegex(s: string): string {
 }
 
 // Total state recomposition: child states → parent state.
+//
+// Canonical truth table (Stage 3B4C3-R2):
+//   both running              → running
+//   exactly one running       → degraded
+//   neither running, ≥1 failed → failed
+//   both stopped              → stopped
 function computeParentState(
   bitgetState: PerExchangeRuntimeState,
   binanceState: PerExchangeRuntimeState,
 ): MultiExchangeRuntimeState {
-  const totalFailed = (bitgetState === 'failed' ? 1 : 0) + (binanceState === 'failed' ? 1 : 0);
-  const totalRunning = (bitgetState === 'running' ? 1 : 0) + (binanceState === 'running' ? 1 : 0);
-  if (totalFailed === 2) return 'failed';
-  if (totalFailed === 1) return 'degraded';
-  if (totalRunning === 2) return 'running';
-  // No failures, no running — stopped.
+  const runningCount =
+    Number(bitgetState === 'running') +
+    Number(binanceState === 'running');
+  if (runningCount === 2) return 'running';
+  if (runningCount === 1) return 'degraded';
+  if (bitgetState === 'failed' || binanceState === 'failed') return 'failed';
   return 'stopped';
 }
 
