@@ -14,6 +14,12 @@
  *   - 显式配置 fail-fast，不静默 fallback
  *   - quant_engine 子进程清除继承的 PYTHONPATH/PYTHONHOME/VIRTUAL_ENV
  *   - 16KB stderr ring buffer，进程故障时附加在 reject message
+ *
+ * Stage 3B4C5-PRE1:
+ *   - startupTimeoutMs 与 CALC timeout 严格分离
+ *   - init() 启动顺序确定化
+ *   - stderr 在进程绑定后、PING 前不清空
+ *   - 超时后完整进程清理
  */
 
 import { spawn, ChildProcess } from 'child_process';
@@ -34,7 +40,7 @@ interface PendingRequest {
 }
 
 /**
- * 构造参数：string 兼容旧调用，object 用于显式 pythonExecutable / env / role。
+ * 构造参数：string 兼容旧调用，object 用于显式 pythonExecutable / env / role / startupTimeout。
  */
 export type PythonBridgeOptions = string | {
     scriptPath: string;
@@ -43,6 +49,12 @@ export type PythonBridgeOptions = string | {
     role?: 'quant-engine' | 'tradingagents' | 'generic';
     /** 额外显式注入的子进程环境变量（在净化之后合并，可覆盖）。 */
     env?: Record<string, string>;
+    /**
+     * 仅用于 Python 进程冷启动和 PING/PONG 握手。
+     * 不影响 CALC 请求 SLA。默认 10_000ms。
+     * 必须为正整数，否则同步抛错。
+     */
+    startupTimeoutMs?: number;
 };
 
 const ENV_VARS = [
@@ -50,6 +62,12 @@ const ENV_VARS = [
     'TRADINGAGENTS_PYTHON',
     'PYTHONBRIDGE_PYTHON',
 ] as const;
+
+/** 启动超时默认值：10 秒（覆盖冷启动 import 最慢情况） */
+const DEFAULT_STARTUP_TIMEOUT_MS = 10_000;
+
+/** 内部用于测试的终止优雅等待期（单元测试通过私有常量注入缩短） */
+const PROCESS_TERMINATE_GRACE_MS = 5000;
 
 /**
  * 解析 Python 解释器路径，按以下优先级：
@@ -102,7 +120,7 @@ function resolvePythonInterpreter(opts: {
  * 其它 → 'generic'
  */
 function inferRole(scriptPath: string): 'quant-engine' | 'tradingagents' | 'generic' {
-    const normalized = scriptPath.replace(/\\/g, '/');
+    const normalized = scriptPath.replace(/\\\\/g, '/');
     if (normalized.includes('quant_engine/daemon.py')) return 'quant-engine';
     if (normalized.includes('tradingagents_adapter.py')) return 'tradingagents';
     return 'generic';
@@ -138,10 +156,12 @@ function buildChildEnv(
 }
 
 /**
- * 分级终止 Python 子进程：SIGTERM → 5s → SIGKILL。
+ * 分级终止 Python 子进程：SIGTERM → grace → SIGKILL。
  * 验证退出后才 resolve，不依赖 child_process.killed 属性。
+ *
+ * @param graceMs SIGTERM → SIGKILL 等待毫秒（默认 5000，测试可注入缩短）。
  */
-function processTerminate(proc: ChildProcess | null): Promise<void> {
+function processTerminate(proc: ChildProcess | null, graceMs: number = PROCESS_TERMINATE_GRACE_MS): Promise<void> {
     return new Promise((resolve) => {
         if (!proc || proc.killed) {
             resolve();
@@ -161,17 +181,17 @@ function processTerminate(proc: ChildProcess | null): Promise<void> {
         // SIGTERM（优雅退出）
         try { proc.kill('SIGTERM'); } catch { /* ignore */ }
 
-        // 5 秒后如果还没退出 → SIGKILL
+        // grace 后如果还没退出 → SIGKILL
         setTimeout(() => {
             if (settled) return;
             try { proc.kill('SIGKILL'); } catch { /* ignore */ }
-            // 再等 5 秒让 SIGKILL 生效
+            // 再等 grace 让 SIGKILL 生效
             setTimeout(() => {
                 if (settled) return;
                 settled = true;
                 resolve();
-            }, 5000);
-        }, 5000);
+            }, graceMs);
+        }, graceMs);
     });
 }
 
@@ -201,8 +221,6 @@ class StderrTail {
     }
 }
 
-// map initialised inline via constructor call in field declaration
-
 export class PythonBridgeDaemon {
     private pythonProcess: ChildProcess | null = null;
     private rl: readline.Interface | null = null;
@@ -210,6 +228,10 @@ export class PythonBridgeDaemon {
     private pythonExecutable: string;
     private role: 'quant-engine' | 'tradingagents' | 'generic';
     private extraEnv: Record<string, string> | undefined;
+    /** Stage 3B4C5-PRE1: startup timeout for cold-start PING/PONG. */
+    private readonly startupTimeoutMs: number;
+    /** 测试可替换的 terminate grace-period，不扩大公共 API。 */
+    private terminateGraceMs: number = PROCESS_TERMINATE_GRACE_MS;
     private stderrTail = new StderrTail();
 
     // correlationId → Promise 寄存器
@@ -220,10 +242,23 @@ export class PythonBridgeDaemon {
             this.scriptPath = scriptPathOrOptions;
             this.role = inferRole(scriptPathOrOptions);
             this.extraEnv = undefined;
+            this.startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS;
         } else {
             this.scriptPath = scriptPathOrOptions.scriptPath;
             this.role = scriptPathOrOptions.role ?? inferRole(this.scriptPath);
             this.extraEnv = scriptPathOrOptions.env;
+            // Validate startupTimeoutMs
+            if (scriptPathOrOptions.startupTimeoutMs !== undefined) {
+                const v = scriptPathOrOptions.startupTimeoutMs;
+                if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || Math.floor(v) !== v) {
+                    throw new Error(
+                        `PythonBridgeDaemon: startupTimeoutMs must be a positive integer, got ${JSON.stringify(v)}`
+                    );
+                }
+                this.startupTimeoutMs = v;
+            } else {
+                this.startupTimeoutMs = DEFAULT_STARTUP_TIMEOUT_MS;
+            }
         }
         this.pythonExecutable = resolvePythonInterpreter({
             pythonExecutable: typeof scriptPathOrOptions === 'object' ? scriptPathOrOptions.pythonExecutable : undefined,
@@ -236,9 +271,12 @@ export class PythonBridgeDaemon {
      * 握手验证 PING/PONG 通过后才 resolve
      */
     public async init(): Promise<void> {
-        return new Promise((resolve, reject) => {
-            const childEnv = buildChildEnv(this.role, this.extraEnv);
+        // Stage 3B4C5-PRE1: 清理上一轮 stderr tail
+        this.stderrTail.clear();
 
+        const childEnv = buildChildEnv(this.role, this.extraEnv);
+
+        return new Promise((resolve, reject) => {
             try {
                 this.pythonProcess = spawn(
                     this.pythonExecutable,
@@ -251,6 +289,7 @@ export class PythonBridgeDaemon {
             }
 
             if (!this.pythonProcess.stdin || !this.pythonProcess.stdout || !this.pythonProcess.stderr) {
+                this.cleanupProcess();
                 return reject(new Error('无法开辟 Python stdio 管道通道'));
             }
 
@@ -261,29 +300,28 @@ export class PythonBridgeDaemon {
 
             this.rl.on('line', (line: string) => this.handleIncomingMessage(line));
 
-            // stderr 尾部捕获（16KB ring buffer）
+            // Stage 3B4C5-PRE1: stderr 捕获在 spawn 后立即绑定，不预清空
             this.pythonProcess.stderr.on('data', (chunk: Buffer) => {
                 this.stderrTail.push(chunk);
             });
 
             // 进程故障 → 熔断
             this.pythonProcess.on('error', (err: Error) => {
-                console.error('Python 守护进程物理异常:', err);
                 this.panicMeltdown(`Python 守护进程物理异常: ${err}\n--- stderr tail ---\n${this.stderrTail.getTail()}`);
             });
 
             this.pythonProcess.on('close', (code: number | null) => {
-                console.warn(`Python 守护进程断开，退出码: ${code}`);
                 this.panicMeltdown(`Python 守护进程 close (code=${code})\n--- stderr tail ---\n${this.stderrTail.getTail()}`);
             });
 
-            // 启动后清空 stderr tail 握手前的启动污渍
-            this.stderrTail.clear();
-
-            // 握手验证
-            this.ping()
+            // Stage 3B4C5-PRE1: 用 startupTimeoutMs 发起 PING
+            this.sendPayload('PING', {}, this.startupTimeoutMs)
                 .then(() => resolve())
-                .catch(reject);
+                .catch((err) => {
+                    // 启动超时/失败时确保进程清理
+                    this.cleanupProcess();
+                    reject(err);
+                });
         });
     }
 
@@ -315,15 +353,15 @@ export class PythonBridgeDaemon {
     }
 
     /**
-     * 发送 PING 握手请求
+     * 发送 PING 握手请求（使用 startupTimeoutMs 作为 timeout）。
      */
-    private async ping(timeoutMs: number = 1000): Promise<void> {
-        return this.sendPayload('PING', {}, timeoutMs);
+    private async ping(): Promise<void> {
+        return this.sendPayload('PING', {}, this.startupTimeoutMs);
     }
 
     /**
      * 向 Python 发送计算请求（快路径核心调用）
-     * @param timeoutMs 超时毫秒，默认 2000ms（2s 硬熔断）
+     * @param timeoutMs 超时毫秒，默认 2000ms（2s 硬熔断）— 与 startup 严格独立
      */
     public async calculate(req: CalcRequest, timeoutMs: number = 2000): Promise<any> {
         return this.sendPayload('CALC', req, timeoutMs);
@@ -331,8 +369,7 @@ export class PythonBridgeDaemon {
 
     /**
      * 通用 payload 发送器（带 correlationId 和超时控制）
-     * 正常请求路径完全不变。
-     * 超时后：reject → SIGTERM → 5s → SIGKILL → panicMeltdown
+     * 超时后：reject → SIGTERM → grace → SIGKILL → panicMeltdown
      */
     private sendPayload(type: string, body: Record<string, any>, timeoutMs: number): Promise<any> {
         if (!this.pythonProcess || !this.pythonProcess.stdin) {
@@ -347,10 +384,9 @@ export class PythonBridgeDaemon {
                 this.pendingRequests.delete(cid);
                 reject(new Error(`管道通信超时 [${type}] - correlationId=${cid}，超过 ${timeoutMs}ms 未响应\n--- stderr tail ---\n${this.stderrTail.getTail()}`));
 
-                // ── 分级终止：SIGTERM → 5s → SIGKILL ───────────────────
+                // ── 分级终止：SIGTERM → grace → SIGKILL ───────────────────
                 const proc = this.pythonProcess;
-                processTerminate(proc).then(() => {
-                    // 清理所有悬挂请求 + 清除进程引用
+                processTerminate(proc, this.terminateGraceMs).then(() => {
                     this.panicMeltdown(`管道通信超时 [${type}] correlationId=${cid}`);
                 }).catch(() => {});
             }, timeoutMs);
@@ -365,6 +401,27 @@ export class PythonBridgeDaemon {
                 reject(new Error(`写入管道失败: ${err}\n--- stderr tail ---\n${this.stderrTail.getTail()}`));
             }
         });
+    }
+
+    /**
+     * Stage 3B4C5-PRE1: 清理进程和管道引用，不触发热熔断事件。
+     * 用于启动失败后的干净重置。
+     */
+    private cleanupProcess(): void {
+        this.rl?.close();
+        this.rl = null;
+        if (this.pythonProcess) {
+            const proc = this.pythonProcess;
+            // 终止但不等待（fire and forget）
+            try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+            this.pythonProcess = null;
+        }
+        // 未完成的请求全部拒绝
+        this.pendingRequests.forEach((pending) => {
+            clearTimeout(pending.timer);
+            pending.reject(new Error('PythonBridgeDaemon init 未完成'));
+        });
+        this.pendingRequests.clear();
     }
 
     /**
@@ -400,5 +457,10 @@ export class PythonBridgeDaemon {
                 // 忽略
             }
         }
+    }
+
+    // ─── 测试辅助（不开新公共 API） ─────────────────────────────
+    /* internal for testing */ __setTerminateGraceMs(ms: number): void {
+        this.terminateGraceMs = ms;
     }
 }
