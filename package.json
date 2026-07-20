@@ -12,6 +12,8 @@
     "start": "node dist/index.js",
     "gateway": "tsx src/gateway/index.ts",
     "worker": "tsx src/bin/worker.ts",
+    "monitor:hermes": "tsx src/bin/hermes-monitor.ts",
+    "monitor:dashboard": "tsx src/bin/hermes-monitor.ts --realtime --dashboard --quiet",
     "onboard": "tsx src/cli/onboard.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test --import tsx --import ./tests/helpers/test-setup.ts tests/**/*.test.ts",

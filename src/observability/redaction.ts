@@ -1,0 +1,61 @@
+import { createHash } from 'crypto';
+
+const SENSITIVE_KEY = /(?:api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)/i;
+const INLINE_SECRET = /\b(api[_-]?key|authorization|cookie|password|private[_-]?key|secret|token)(\s*[:=]\s*)([^\s,;]+)/gi;
+const BEARER = /\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi;
+const SECRET_VALUE = '<REDACTED>';
+
+export interface RedactionResult<T> {
+  value: T;
+  redactions: string[];
+}
+
+export function digestCommand(command: string): string {
+  return `sha256:${createHash('sha256').update(command, 'utf8').digest('hex')}`;
+}
+
+export function redactText(input: string): RedactionResult<string> {
+  const redactions = new Set<string>();
+  let value = input.replace(BEARER, () => {
+    redactions.add('bearer');
+    return `Bearer ${SECRET_VALUE}`;
+  });
+  value = value.replace(INLINE_SECRET, (_match, key: string, separator: string) => {
+    redactions.add(key.toLowerCase());
+    return `${key}${separator}${SECRET_VALUE}`;
+  });
+  return { value, redactions: [...redactions].sort() };
+}
+
+export function redactValue<T>(input: T): RedactionResult<T> {
+  const redactions = new Set<string>();
+  const seen = new WeakSet<object>();
+
+  function visit(value: unknown, key?: string): unknown {
+    if (key && SENSITIVE_KEY.test(key)) {
+      redactions.add(key.toLowerCase());
+      return SECRET_VALUE;
+    }
+    if (typeof value === 'string') {
+      const result = redactText(value);
+      result.redactions.forEach(item => redactions.add(item));
+      return result.value;
+    }
+    if (value === null || typeof value !== 'object') return value;
+    if (value instanceof Date) return value.toISOString();
+    if (seen.has(value)) {
+      redactions.add('circular_reference');
+      return '<CIRCULAR>';
+    }
+    seen.add(value);
+    if (Array.isArray(value)) return value.map(item => visit(item));
+
+    const copy: Record<string, unknown> = {};
+    for (const [childKey, childValue] of Object.entries(value)) {
+      copy[childKey] = visit(childValue, childKey);
+    }
+    return copy;
+  }
+
+  return { value: visit(input) as T, redactions: [...redactions].sort() };
+}
