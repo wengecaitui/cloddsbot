@@ -15,12 +15,14 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { PythonBridgeDaemon } from '../router/PythonBridgeDaemon.js';
-import { IndicatorService } from '../pipeline/IndicatorService.js';
-import { FastPipeline, FastPipelineConfig, FastPipelineResult } from '../pipeline/FastPipeline.js';
-import { ExecutionRouter, RouterConfig, SignalSource } from '../router/ExecutionRouter.js';
-import { KillSwitch, KillSwitchConfig } from '../router/KillSwitch.js';
-import { MarketBiasReportFull } from '../types/market-bias.js';
+import { PythonBridgeDaemon } from '../../src/router/PythonBridgeDaemon';
+import { IndicatorService } from '../../src/pipeline/IndicatorService';
+import { FastPipeline } from '../../src/pipeline/FastPipeline';
+import type { FastPipelineConfig, FastPipelineResult } from '../../src/pipeline/FastPipeline';
+import { ExecutionRouter } from '../../src/router/ExecutionRouter';
+import type { RouterConfig } from '../../src/router/ExecutionRouter';
+import { KillSwitch } from '../../src/router/KillSwitch';
+import type { MarketBiasReportFull } from '../../src/types/market-bias';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -93,6 +95,7 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
     router = makeRouter();
 
     const config: FastPipelineConfig = {
+      exchange: 'bitget',
       router,
       indicatorService,
     };
@@ -111,11 +114,13 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
 
   it('should execute end-to-end and return a FastPipelineResult', async () => {
     const result: FastPipelineResult = await fastPipeline.execute({
+      exchange: 'bitget',
       source: 'spread_scanner',
       symbol,
     });
 
     assert.ok(result, 'FastPipelineResult should not be null');
+    assert.equal(result.exchange, 'bitget');
     assert.equal(typeof result.elapsedMs, 'number', 'elapsedMs should be a number');
     assert.ok(result.elapsedMs > 0, 'elapsedMs should be > 0');
     assert.ok(result.elapsedMs < 1500, 'elapsedMs should be < 1500 (bridge timeout)');
@@ -129,6 +134,7 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
 
   it('should populate indicatorResults', async () => {
     const result = await fastPipeline.execute({
+      exchange: 'bitget',
       source: 'spread_scanner',
       symbol,
     });
@@ -147,6 +153,7 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
     const report = router.getBiasReport();
     assert.ok(report, 'router.getBiasReport() should return a report');
     assert.equal(report!.globalBias, 'bullish');
+    assert.equal(report!.exchange, 'bitget');
   });
 
   // ── Test 4: Event emission ───────────────────────────────────
@@ -155,10 +162,11 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
     const events: any[] = [];
     fastPipeline.on('decision_made', (evt) => events.push(evt));
 
-    await fastPipeline.execute({ source: 'spread_scanner', symbol });
+    await fastPipeline.execute({ exchange: 'bitget', source: 'spread_scanner', symbol });
 
     assert.equal(events.length, 1, 'should emit exactly one decision_made event');
     assert.equal(events[0].symbol, symbol);
+    assert.equal(events[0].exchange, 'bitget');
   });
 
   // ── Test 5: Error propagation (bridge reject) ────────────────
@@ -166,10 +174,10 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
   it('should fail fast when bridge rejects', async () => {
     const deadBridge = new PythonBridgeDaemon('nonexistent_script.py');
     const brokenService = new IndicatorService(deadBridge, 500);
-    const brokenPipeline = new FastPipeline({ router, indicatorService: brokenService });
+    const brokenPipeline = new FastPipeline({ exchange: 'bitget', router, indicatorService: brokenService });
 
     await assert.rejects(
-      () => brokenPipeline.execute({ source: 'spread_scanner', symbol }),
+      () => brokenPipeline.execute({ exchange: 'bitget', source: 'spread_scanner', symbol }),
       (err: Error) => {
         assert.ok(err.message.includes('Python 进程未就绪') || err.message.includes('failed'),
           `Expected bridge error, got: ${err.message}`);
@@ -185,10 +193,10 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
     const hangingBridge = new PythonBridgeDaemon('quant_engine/daemon.py');
     // Don't call init() — bridge is not connected, so sendPayload will reject immediately
     const hangingService = new IndicatorService(hangingBridge, 100); // 100ms timeout
-    const hangingPipeline = new FastPipeline({ router, indicatorService: hangingService });
+    const hangingPipeline = new FastPipeline({ exchange: 'bitget', router, indicatorService: hangingService });
 
     await assert.rejects(
-      () => hangingPipeline.execute({ source: 'spread_scanner', symbol }),
+      () => hangingPipeline.execute({ exchange: 'bitget', source: 'spread_scanner', symbol }),
       (err: Error) => {
         assert.ok(
           err.message.includes('未就绪') || err.message.includes('timeout'),

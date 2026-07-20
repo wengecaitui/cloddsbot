@@ -12,12 +12,11 @@
  */
 
 import { EventEmitter } from 'events';
-import { providers } from '../providers';
 import type { ExchangeId } from '../data/MarketIdentity';
 import { assertExchangeId, isExchangeId } from '../data/MarketIdentity';
 import { KillSwitch } from './KillSwitch';
 import type { ReportStoreConfig } from '../store/ReportStore';
-import type { MarketBiasReport, MarketBiasReportFull } from '../types/market-bias';
+import type { MarketBiasReportFull } from '../types/market-bias';
 
 export enum SignalSource {
   /** Hermes Cron 定时扫描（每小时） */
@@ -125,6 +124,8 @@ export class ExecutionRouter extends EventEmitter {
       );
     }
 
+    const biasReport = this.getBiasReport();
+
     // 硬分流规则 1：Cron → Slow
     if (signal.source === SignalSource.HERMES_CRON) {
       return {
@@ -132,7 +133,7 @@ export class ExecutionRouter extends EventEmitter {
         path: ExecutionPath.SLOW,
         source: signal.source,
         reason: 'Cron-triggered → mandatory Slow Path (research pipeline)',
-        biasReport: this.biasReport ?? undefined,
+        biasReport: biasReport ?? undefined,
         defensiveMode: this.isBiasReportStale(),
       };
     }
@@ -144,7 +145,7 @@ export class ExecutionRouter extends EventEmitter {
         path: ExecutionPath.FAST,
         source: signal.source,
         reason: 'Spread signal → mandatory Fast Path (execution pipeline)',
-        biasReport: this.biasReport ?? undefined,
+        biasReport: biasReport ?? undefined,
         defensiveMode: this.isBiasReportStale(),
       };
     }
@@ -155,7 +156,7 @@ export class ExecutionRouter extends EventEmitter {
       path: this.hasActivePositions() ? ExecutionPath.FAST : ExecutionPath.SLOW,
       source: signal.source,
       reason: 'Manual trigger → context-based routing',
-      biasReport: this.biasReport ?? undefined,
+      biasReport: biasReport ?? undefined,
       defensiveMode: this.isBiasReportStale(),
     };
   }
@@ -170,8 +171,17 @@ export class ExecutionRouter extends EventEmitter {
    * Stage 3B4C4: validates report.exchange === this.exchange BEFORE updating
    * memory, emitting events, or writing to disk. Exchange-scoped filename.
    */
-  async updateBiasReport(report: MarketBiasReportFull): Promise<void> {
-    // Stage 3B4C4: validate exchange provenance before ANY mutation
+  updateBiasReport(report: MarketBiasReportFull): Promise<void> {
+    this.validateReportExchange(report);
+
+    this.biasReport = report;
+    this.emit('bias_updated', { exchange: this.exchange, report, ageHours: 0 });
+
+    return this.persistBiasReport(report);
+  }
+
+  /** Validate report provenance synchronously before any side effect. */
+  private validateReportExchange(report: MarketBiasReportFull): void {
     if (!isExchangeId((report as { exchange?: unknown }).exchange)) {
       throw new Error(
         `ExecutionRouter.updateBiasReport: report.exchange is not a valid ExchangeId: ${JSON.stringify((report as { exchange?: unknown }).exchange)}`,
@@ -182,11 +192,10 @@ export class ExecutionRouter extends EventEmitter {
         `ExecutionRouter.updateBiasReport: report.exchange (${report.exchange}) !== router.exchange (${this.exchange})`,
       );
     }
+  }
 
-    this.biasReport = report;
-    this.emit('bias_updated', { exchange: this.exchange, report, ageHours: 0 });
-
-    // Stage 3B4C4: exchange-scoped atomic write to bias.${exchange}.json
+  /** Persist after synchronous validation/memory update; disk failure never rolls memory back. */
+  private async persistBiasReport(report: MarketBiasReportFull): Promise<void> {
     try {
       const { ReportStore } = await import('../store/ReportStore');
       const store = new ReportStore({
@@ -220,6 +229,7 @@ export class ExecutionRouter extends EventEmitter {
       if (!isExchangeId((raw as { exchange?: unknown }).exchange)) return null;
       if ((raw as { exchange: ExchangeId }).exchange !== this.exchange) return null;
 
+      this.biasReport = raw;
       return raw;
     } catch {
       return null;
@@ -230,6 +240,9 @@ export class ExecutionRouter extends EventEmitter {
    * 获取当前 MarketBiasReport
    */
   getBiasReport(): MarketBiasReportFull | null {
+    if (!this.biasReport) return null;
+    if (!isExchangeId((this.biasReport as { exchange?: unknown }).exchange)) return null;
+    if (this.biasReport.exchange !== this.exchange) return null;
     return this.biasReport;
   }
 
@@ -238,8 +251,9 @@ export class ExecutionRouter extends EventEmitter {
    * 使用 updatedAt 而非 timestamp，防止 SlowPipeline 挂掉后快路径拿到过期报告盲目交易
    */
   private isBiasReportStale(): boolean {
-    if (!this.biasReport) return true;
-    const ageMs = Date.now() - this.biasReport.updatedAt;
+    const report = this.getBiasReport();
+    if (!report) return true;
+    const ageMs = Date.now() - report.updatedAt;
     const ageHours = ageMs / (1000 * 60 * 60);
     return ageHours > this.config.maxBiasReportAgeHours;
   }

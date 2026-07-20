@@ -21,7 +21,12 @@ import { createSymbolRegistry } from '../../../src/runtime/market/SymbolFormat';
 import type { ExchangeId } from '../../../src/data/MarketIdentity';
 import { createTradingEventBus } from '../../../src/events/TradingEventBus';
 import { ExecutionRouter } from '../../../src/router/ExecutionRouter';
+import { SignalSource } from '../../../src/router/ExecutionRouter';
 import { KillSwitch } from '../../../src/router/KillSwitch';
+import type { MarketBiasReportFull } from '../../../src/types/market-bias';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 // ─── Fake Scheduler (deterministic timer) ───────────────────────────────────
 
@@ -1639,4 +1644,222 @@ test('58. RiskSnapshot exchange distinct per side', () => {
   multi.getRuntime('bitget').router.killSwitch.lock('bitget', 'test lock');
   const binAfterLock = multi.getRuntime('binance').router.killSwitch.snapshot('binance');
   assert.equal(binAfterLock.isTriggered, false, 'binance not affected by bitget lock');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3B4C4-R1: Router persistence + disk recovery invariants
+// ═══════════════════════════════════════════════════════════════════════════
+
+function makeBiasReport(exchange: ExchangeId, symbol = 'BTC/USDT'): MarketBiasReportFull {
+  const now = Date.now();
+  return {
+    exchange,
+    timestamp: now,
+    updatedAt: now,
+    globalBias: 'bullish',
+    confidence: 80,
+    assets: [{
+      symbol,
+      bias: 'bullish',
+      confidence: 80,
+      volatility: 25,
+      direction: 'long',
+      suggestedPositionPct: 10,
+      entryCondition: 'test',
+      stopLoss: '1%',
+      takeProfit: '2%',
+    }],
+    globalLongShortRatio: 1.2,
+    globalVolatility: 25,
+    fearGreedIndex: 60,
+    fundingStatus: 'neutral',
+    whitelist: [symbol],
+    blacklist: [],
+    riskEvents: [],
+    meta: {
+      source: 'manual',
+      modelVersion: 'test',
+      generationTimeMs: 1,
+      inputSummary: 'test',
+    },
+  };
+}
+
+function makeRouterForStore(exchange: ExchangeId, dir: string, config: Record<string, unknown> = {}): ExecutionRouter {
+  return new ExecutionRouter({
+    exchange,
+    fastPathTimeoutSec: 1.5,
+    maxBiasReportAgeHours: 2,
+    killSwitch: new KillSwitch(exchange),
+    reportStoreConfig: { dir, ...config } as any,
+  });
+}
+
+function withTempDir<T>(run: (dir: string) => T): T {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'clodds-3b4c4-r1-'));
+  try {
+    const result = run(dir);
+    if (result && typeof (result as any).then === 'function') {
+      return (Promise.resolve(result).finally(() => {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }) as T);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    return result;
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+// 59. Both exchange files coexist in same directory
+test('59. bitget and binance reports coexist in same temp directory', async () => {
+  await withTempDir(async (dir) => {
+    const bitget = makeRouterForStore('bitget', dir);
+    const binance = makeRouterForStore('binance', dir);
+    await Promise.all([
+      bitget.updateBiasReport(makeBiasReport('bitget')),
+      binance.updateBiasReport(makeBiasReport('binance')),
+    ]);
+    assert.equal(fs.existsSync(path.join(dir, 'bias.bitget.json')), true);
+    assert.equal(fs.existsSync(path.join(dir, 'bias.binance.json')), true);
+  });
+});
+
+// 60. Persisted contents carry correct exchange
+test('60. persisted report files contain correct exchange', async () => {
+  await withTempDir(async (dir) => {
+    const bitget = makeRouterForStore('bitget', dir);
+    const binance = makeRouterForStore('binance', dir);
+    await bitget.updateBiasReport(makeBiasReport('bitget'));
+    await binance.updateBiasReport(makeBiasReport('binance'));
+    const b = JSON.parse(fs.readFileSync(path.join(dir, 'bias.bitget.json'), 'utf8'));
+    const n = JSON.parse(fs.readFileSync(path.join(dir, 'bias.binance.json'), 'utf8'));
+    assert.equal(b.exchange, 'bitget');
+    assert.equal(n.exchange, 'binance');
+  });
+});
+
+// 61. Legacy bias.json is ignored
+test('61. legacy bias.json is never loaded', async () => {
+  await withTempDir(async (dir) => {
+    fs.writeFileSync(path.join(dir, 'bias.json'), JSON.stringify(makeBiasReport('bitget')));
+    const bitget = makeRouterForStore('bitget', dir);
+    const binance = makeRouterForStore('binance', dir);
+    assert.equal(await bitget.loadBiasReportFromDisk(), null);
+    assert.equal(await binance.loadBiasReportFromDisk(), null);
+    assert.equal(bitget.getBiasReport(), null);
+    assert.equal(binance.getBiasReport(), null);
+  });
+});
+
+// 62. Missing exchange on disk returns null
+test('62. disk report missing exchange returns null without memory restore', async () => {
+  await withTempDir(async (dir) => {
+    const raw: any = makeBiasReport('bitget');
+    delete raw.exchange;
+    fs.writeFileSync(path.join(dir, 'bias.bitget.json'), JSON.stringify(raw));
+    const router = makeRouterForStore('bitget', dir);
+    assert.equal(await router.loadBiasReportFromDisk(), null);
+    assert.equal(router.getBiasReport(), null);
+  });
+});
+
+// 63. Invalid exchange on disk returns null
+test('63. disk report with coinbase exchange returns null', async () => {
+  await withTempDir(async (dir) => {
+    fs.writeFileSync(path.join(dir, 'bias.bitget.json'), JSON.stringify({ ...makeBiasReport('bitget'), exchange: 'coinbase' }));
+    const router = makeRouterForStore('bitget', dir);
+    assert.equal(await router.loadBiasReportFromDisk(), null);
+    assert.equal(router.getBiasReport(), null);
+  });
+});
+
+// 64. Mismatched exchange on disk returns null
+test('64. bitget file containing binance report returns null', async () => {
+  await withTempDir(async (dir) => {
+    fs.writeFileSync(path.join(dir, 'bias.bitget.json'), JSON.stringify(makeBiasReport('binance')));
+    const router = makeRouterForStore('bitget', dir);
+    assert.equal(await router.loadBiasReportFromDisk(), null);
+    assert.equal(router.getBiasReport(), null);
+  });
+});
+
+// 65. Caller filename override cannot escape exchange-specific name
+test('65. caller filename override is ignored', async () => {
+  await withTempDir(async (dir) => {
+    const router = makeRouterForStore('bitget', dir, { filename: 'evil.json' });
+    await router.updateBiasReport(makeBiasReport('bitget'));
+    assert.equal(fs.existsSync(path.join(dir, 'bias.bitget.json')), true);
+    assert.equal(fs.existsSync(path.join(dir, 'evil.json')), false);
+  });
+});
+
+// 66. Mismatch update throws synchronously and has no side effects
+test('66. updateBiasReport mismatch throws synchronously without side effects', () => {
+  withTempDir((dir) => {
+    const router = makeRouterForStore('bitget', dir);
+    let emitted = false;
+    router.on('bias_updated', () => { emitted = true; });
+    assert.throws(
+      () => router.updateBiasReport(makeBiasReport('binance')),
+      /report\.exchange.*router\.exchange/,
+    );
+    assert.equal(emitted, false);
+    assert.equal(router.getBiasReport(), null);
+    assert.equal(fs.existsSync(path.join(dir, 'bias.bitget.json')), false);
+  });
+});
+
+// 67. Valid disk load restores in-memory report
+test('67. valid disk report load restores router memory', async () => {
+  await withTempDir(async (dir) => {
+    const report = makeBiasReport('bitget');
+    fs.writeFileSync(path.join(dir, 'bias.bitget.json'), JSON.stringify(report));
+    const router = makeRouterForStore('bitget', dir);
+    const loaded = await router.loadBiasReportFromDisk();
+    assert.equal(loaded?.exchange, 'bitget');
+    assert.equal(router.getBiasReport()?.exchange, 'bitget');
+  });
+});
+
+// 68. Route after valid disk load contains restored bias and decision exchange
+test('68. route uses valid report restored from disk', async () => {
+  await withTempDir(async (dir) => {
+    const report = makeBiasReport('bitget');
+    fs.writeFileSync(path.join(dir, 'bias.bitget.json'), JSON.stringify(report));
+    const router = makeRouterForStore('bitget', dir);
+    await router.loadBiasReportFromDisk();
+    const decision = router.route({ exchange: 'bitget', source: SignalSource.MANUAL });
+    assert.equal(decision.exchange, 'bitget');
+    assert.equal(decision.biasReport?.exchange, 'bitget');
+  });
+});
+
+// 69. Missing/invalid update exchange throws synchronously
+test('69. updateBiasReport missing or invalid exchange throws synchronously', () => {
+  withTempDir((dir) => {
+    const router = makeRouterForStore('bitget', dir);
+    const missing: any = makeBiasReport('bitget');
+    delete missing.exchange;
+    assert.throws(() => router.updateBiasReport(missing), /not a valid ExchangeId/);
+    assert.throws(
+      () => router.updateBiasReport({ ...makeBiasReport('bitget'), exchange: 'coinbase' } as any),
+      /not a valid ExchangeId/,
+    );
+    assert.equal(router.getBiasReport(), null);
+    assert.equal(fs.existsSync(path.join(dir, 'bias.bitget.json')), false);
+  });
+});
+
+// 70. getBiasReport and route fail closed on corrupted in-memory provenance
+test('70. getBiasReport rejects corrupted in-memory report provenance', () => {
+  withTempDir((dir) => {
+    const router = makeRouterForStore('bitget', dir);
+    (router as any).biasReport = { ...makeBiasReport('bitget'), exchange: 'binance' };
+    assert.equal(router.getBiasReport(), null);
+    const decision = router.route({ exchange: 'bitget', source: SignalSource.HERMES_CRON });
+    assert.equal(decision.biasReport, undefined);
+    assert.equal(decision.defensiveMode, true);
+  });
 });
