@@ -8,6 +8,9 @@
  *
  * 目标延迟：< 2 秒
  *
+ * Stage 3B4C4: exchange-bound. Config requires exchange. Signal exchange validated
+ * at method start. All fail-closed paths return decision='skip' with config.exchange.
+ *
  * ⚠️ 当前为骨架（Mock）实现
  * Phase 3b: 替换为真实 Brale 技术分析
  * Phase 4: Python bridge for 精度关键指标
@@ -18,6 +21,8 @@
  */
 
 import { EventEmitter } from 'events';
+import type { ExchangeId } from '../data/MarketIdentity';
+import { assertExchangeId, isExchangeId } from '../data/MarketIdentity';
 import { IndicatorService } from './IndicatorService';
 import { ExecutionRouter } from '../router/ExecutionRouter';
 import { MarketBiasReportFull } from '../types/market-bias';
@@ -25,8 +30,6 @@ import { evaluate as decisionEngineEvaluate } from './DecisionEngine';
 import type { EngineInput } from './DecisionEngine';
 import type { MarketSnapshotStore } from '../data/MarketSnapshot';
 import type { CandleSeriesStore } from '../data/CandleSeriesStore';
-import type { ExchangeId } from '../data/MarketIdentity';
-import { isExchangeId } from '../data/MarketIdentity';
 import type { Series } from '../data/types';
 
 export interface FastPipelineMarketData {
@@ -45,6 +48,8 @@ export interface FastPipelineMarketData {
 }
 
 export interface FastPipelineConfig {
+  /** Stage 3B4C4: exchange this pipeline is bound to (required, authoritative). */
+  readonly exchange: ExchangeId;
   router: ExecutionRouter;
   /** 抽象技术指标计算服务 — FastPipeline 不关心底层实现 */
   indicatorService: IndicatorService;
@@ -57,6 +62,8 @@ export interface FastPipelineConfig {
 }
 
 export interface FastPipelineResult {
+  /** Stage 3B4C4: exchange this result belongs to (always config.exchange). */
+  readonly exchange: ExchangeId;
   /** 决策：交易或放弃 */
   decision: 'trade' | 'skip' | 'defense';
   /** 交易方向（如有） */
@@ -78,12 +85,29 @@ export class FastPipeline extends EventEmitter {
 
   constructor(config: FastPipelineConfig) {
     super();
+
+    // Stage 3B4C4: validate exchange at construction
+    assertExchangeId('FastPipeline', config.exchange);
+
+    // Stage 3B4C4-R2: router must be bound to the same exchange
+    if (config.router.exchange !== config.exchange) {
+      throw new Error(
+        `FastPipeline: router.exchange (${config.router.exchange}) !== config.exchange (${config.exchange})`,
+      );
+    }
+
     // Stage 3A5: validate marketData config at construction time
     if (config.marketData) {
       const md = config.marketData;
       // Stage 3B4C2: exchange must be a valid ExchangeId — fail fast at construction.
       if (!isExchangeId(md.exchange)) {
         throw new Error(`FastPipeline: marketData.exchange must be a valid ExchangeId, got ${JSON.stringify(md.exchange)}`);
+      }
+      // Stage 3B4C4-R2: marketData.exchange must match config.exchange
+      if (md.exchange !== config.exchange) {
+        throw new Error(
+          `FastPipeline: marketData.exchange (${md.exchange}) !== config.exchange (${config.exchange})`,
+        );
       }
       if (!md.interval || typeof md.interval !== 'string') {
         throw new Error('FastPipeline: marketData.interval must be a non-empty string');
@@ -118,24 +142,57 @@ export class FastPipeline extends EventEmitter {
   /**
    * 执行快路径决策
    *
-   * 流程：
-   *  1. 读取 MarketBiasReport（路由层已注入）
-   *  2. 注入技术分析（mock → Phase 3b 真实 Brale）
-   *  3. Risk Team 硬限制拦截
-   *  4. [Stage 3A4] 可选市场数据守卫 + 喂 OHLCV 序列
-   *  5. Decision Engine (replaceable rules — pure function, no hidden state)
+   * Stage 3B4C4: validates signal.exchange === config.exchange at method start.
+   * On mismatch, returns decision='skip' immediately — fail closed.
    */
   async execute(signal: {
+    exchange: ExchangeId;
     source: string;
     symbol: string;
     signalData?: Record<string, unknown>;
   }): Promise<FastPipelineResult> {
     const startTime = Date.now();
+
+    // Stage 3B4C4: validate signal exchange BEFORE any I/O, router reads, or events
+    if (signal.exchange !== this.config.exchange) {
+      return {
+        exchange: this.config.exchange,
+        decision: 'skip',
+        symbol: signal.symbol,
+        reason: `exchange mismatch: signal has ${signal.exchange}, pipeline bound to ${this.config.exchange}`,
+        elapsedMs: Date.now() - startTime,
+        biasReport: null,
+      };
+    }
+
     const biasReport = this.config.router.getBiasReport();
+
+    // Stage 3B4C4: defensive check — even if router returns a report, verify exchange
+    if (biasReport && !isExchangeId((biasReport as { exchange?: unknown }).exchange)) {
+      return {
+        exchange: this.config.exchange,
+        decision: 'skip',
+        symbol: signal.symbol,
+        reason: 'Invalid report.exchange — fail closed',
+        elapsedMs: Date.now() - startTime,
+        biasReport: null,
+      };
+    }
+    if (biasReport && (biasReport as { exchange: ExchangeId }).exchange !== this.config.exchange) {
+      return {
+        exchange: this.config.exchange,
+        decision: 'skip',
+        symbol: signal.symbol,
+        reason: `report.exchange mismatch: got ${(biasReport as { exchange: ExchangeId }).exchange}, expected ${this.config.exchange}`,
+        elapsedMs: Date.now() - startTime,
+        biasReport: null,
+      };
+    }
 
     // Step 1: 检查 MarketBiasReport
     if (!biasReport) {
       return {
+        exchange: this.config.exchange,
         decision: 'skip',
         reason: 'No MarketBiasReport available — wait for SlowPath to complete',
         elapsedMs: Date.now() - startTime,
@@ -148,6 +205,7 @@ export class FastPipeline extends EventEmitter {
     const maxAgeMs = this.config.router.getConfig().maxBiasReportAgeHours * 60 * 60 * 1000;
     if (reportAgeMs > maxAgeMs) {
       return {
+        exchange: this.config.exchange,
         decision: 'defense',
         symbol: signal.symbol,
         reason: `Stale MarketBiasReport: ${Math.round(reportAgeMs / 3600000)}h > ${this.config.router.getConfig().maxBiasReportAgeHours}h — KillSwitch activated`,
@@ -159,6 +217,7 @@ export class FastPipeline extends EventEmitter {
     // Step 2: 检查白名单
     if (!biasReport.whitelist.includes(signal.symbol)) {
       return {
+        exchange: this.config.exchange,
         decision: 'skip',
         symbol: signal.symbol,
         reason: `${signal.symbol} not in MarketBiasReport whitelist`,
@@ -167,12 +226,13 @@ export class FastPipeline extends EventEmitter {
       };
     }
 
-    // Step 3: Risk Team 拦截（硬限制）
+    // Step 3: Risk Team 拦截（硬限制）— Stage 3B4C4: pass exchange
     const killSwitch = this.config.router.killSwitch;
     if (killSwitch) {
-      const riskCheck = killSwitch.check(signal.symbol, 0);
+      const riskCheck = killSwitch.check(this.config.exchange, signal.symbol, 0);
       if (!riskCheck.allowed) {
         return {
+          exchange: this.config.exchange,
           decision: 'defense',
           symbol: signal.symbol,
           reason: riskCheck.reason ?? 'KillSwitch triggered',
@@ -198,6 +258,7 @@ export class FastPipeline extends EventEmitter {
       const snapshot = md.snapshotStore.getSnapshot(exchange, signal.symbol);
       if (!snapshot) {
         return {
+          exchange: this.config.exchange,
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] no snapshot for ${symKey} — wait for market data`,
@@ -209,6 +270,7 @@ export class FastPipeline extends EventEmitter {
       // 4b. Snapshot 整体陈旧
       if (snapshot.isStale) {
         return {
+          exchange: this.config.exchange,
           decision: 'defense',
           symbol: signal.symbol,
           reason: `[MD] snapshot stale (${snapshot.ageMs}ms) for ${symKey}`,
@@ -221,6 +283,7 @@ export class FastPipeline extends EventEmitter {
       const targetKline = snapshot.klines[interval];
       if (!targetKline) {
         return {
+          exchange: this.config.exchange,
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] snapshot missing ${interval} kline for ${symKey}`,
@@ -233,6 +296,7 @@ export class FastPipeline extends EventEmitter {
       const klineAgeMs = snapshot.generatedAt - targetKline.receivedAt;
       if (klineAgeMs > maxKlineAgeMs) {
         return {
+          exchange: this.config.exchange,
           decision: 'defense',
           symbol: signal.symbol,
           reason: `[MD] ${interval} kline stale (${klineAgeMs}ms > ${maxKlineAgeMs}ms) for ${symKey}`,
@@ -245,6 +309,7 @@ export class FastPipeline extends EventEmitter {
       if (!md.candleStore.hasMinimumSeries(exchange, signal.symbol, interval, minimumSeries)) {
         const available = md.candleStore.getSeries(exchange, signal.symbol, interval, seriesLimit).length;
         return {
+          exchange: this.config.exchange,
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] insufficient candle history for ${symKey} ${interval}: ${available}/${minimumSeries}`,
@@ -261,6 +326,7 @@ export class FastPipeline extends EventEmitter {
       const lastTs = pulled[pulled.length - 1]?.ts;
       if (typeof lastTs !== 'number' || lastTs !== targetKline.kline.ts) {
         return {
+          exchange: this.config.exchange,
           decision: 'skip',
           symbol: signal.symbol,
           reason: `[MD] snapshot/candle desync for ${symKey} ${interval}: snapshotTs=${targetKline.kline.ts} candleTs=${lastTs ?? 'none'}`,
@@ -290,7 +356,7 @@ export class FastPipeline extends EventEmitter {
    * Decision Engine 封装 —— 纯函数调用，语义不变。
    */
   private decide(
-    signal: { source: string; symbol: string; signalData?: Record<string, unknown> },
+    signal: { exchange: ExchangeId; source: string; symbol: string; signalData?: Record<string, unknown> },
     biasReport: MarketBiasReportFull,
     indicatorResults: import('../types/indicators').IndicatorResult[],
     startTime: number,
@@ -306,6 +372,7 @@ export class FastPipeline extends EventEmitter {
     const deResult = decisionEngineEvaluate(deInput);
 
     this.emit('decision_made', {
+      exchange: this.config.exchange,
       symbol: signal.symbol,
       bias: bias?.direction ?? 'hold',
       decision: deResult.decision,
@@ -313,6 +380,7 @@ export class FastPipeline extends EventEmitter {
     });
 
     return {
+      exchange: this.config.exchange,
       decision: deResult.decision,
       direction: deResult.direction,
       symbol: signal.symbol,

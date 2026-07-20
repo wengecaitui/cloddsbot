@@ -70,6 +70,17 @@ export function createTradingEventBus(): TradingEventBus {
         if (p.kline.confirm !== true) {
           throw new KlineClosedEventRejectedError();
         }
+      } else if (type === 'research.bias.updated') {
+        // Stage 3B4C4: validate report.exchange provenance for bias events
+        const p = payload as TradingEventPayloadMap['research.bias.updated'];
+        if (!p || !p.report) {
+          throw new InvalidExchangeProvenanceError('research.bias.updated requires report payload');
+        }
+        if (!isExchangeId((p.report as { exchange?: unknown }).exchange)) {
+          throw new InvalidExchangeProvenanceError(
+            `research.bias.updated: invalid report.exchange: ${JSON.stringify((p.report as { exchange?: unknown }).exchange)}`,
+          );
+        }
       }
 
       seq += 1;

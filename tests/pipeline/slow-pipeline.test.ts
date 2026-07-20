@@ -55,6 +55,7 @@ class FakeAdapter {
 // ── Fake Router ──────────────────────────────────────────────────────────────
 
 class FakeRouter {
+  public readonly exchange = 'bitget' as const;
   public lastReport: MarketBiasReportFull | null = null;
   public updateCalled = 0;
   public shouldReject = false;
@@ -94,13 +95,14 @@ test('1. successful report publishes research.bias.updated', async () => {
   bus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     clock,
     adapterFactory: () => adapter as any,
   });
 
-  const report = await pipeline.run('BTC/USDT');
+  const report = await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events.length, 1, 'one event published');
   assert.equal(events[0].type, 'research.bias.updated');
@@ -119,12 +121,13 @@ test('2. fallback report also publishes event', async () => {
   bus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
-  const report = await pipeline.run('BTC/USDT');
+  const report = await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events.length, 1, 'fallback published');
   assert.equal(events[0].report.globalBias, 'neutral');
@@ -141,12 +144,13 @@ test('3. injected bus is reused', async () => {
   externalBus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus: externalBus,
     adapterFactory: () => adapter as any,
   });
 
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events.length, 1, 'external bus received event');
 });
@@ -157,13 +161,14 @@ test('4. default bus can be subscribed via pipeline.bus', async () => {
   const events: any[] = [];
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     adapterFactory: () => adapter as any,
   });
 
   pipeline.bus.subscribe('research.bias.updated', (e) => events.push(e));
 
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events.length, 1, 'default bus works');
 });
@@ -178,6 +183,7 @@ test('5. receivedAt uses injected clock', async () => {
   bus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     clock,
@@ -185,7 +191,7 @@ test('5. receivedAt uses injected clock', async () => {
   });
 
   clock.advance(5000);
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events[0].receivedAt, 6000, 'receivedAt from clock');
 });
@@ -205,12 +211,13 @@ test('6. router.updateBiasReport called before publish', async () => {
   bus.subscribe('research.bias.updated', () => order.push('publish'));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.deepEqual(order, ['router', 'publish'], 'router before publish');
 });
@@ -226,6 +233,7 @@ test('7. router rejection does not block publish', async () => {
   bus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
@@ -233,7 +241,7 @@ test('7. router rejection does not block publish', async () => {
 
   pipeline.on('persistence_warning', (w) => warnings.push(w));
 
-  const report = await pipeline.run('BTC/USDT');
+  const report = await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events.length, 1, 'event still published');
   assert.equal(warnings.length, 1, 'persistence warning emitted');
@@ -251,6 +259,7 @@ test('8. subscriber failure does not block return', async () => {
   });
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
@@ -258,7 +267,7 @@ test('8. subscriber failure does not block return', async () => {
 
   pipeline.on('publish_warning', (w) => warnings.push(w));
 
-  const report = await pipeline.run('BTC/USDT');
+  const report = await pipeline.run('bitget', 'BTC/USDT');
 
   assert.ok(report, 'run() succeeded');
   assert.equal(warnings.length, 1, 'publish warning emitted');
@@ -274,13 +283,14 @@ test('9. each run publishes exactly once', async () => {
   bus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
-  await pipeline.run('BTC/USDT');
-  await pipeline.run('ETH/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
+  await pipeline.run('bitget', 'ETH/USDT');
 
   assert.equal(events.length, 2, 'two runs = two events');
 });
@@ -292,6 +302,7 @@ test('10. run_complete event still fires', async () => {
   const completes: any[] = [];
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
@@ -299,7 +310,7 @@ test('10. run_complete event still fires', async () => {
 
   pipeline.on('run_complete', (c) => completes.push(c));
 
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(completes.length, 1, 'run_complete fired');
   assert.ok(completes[0].report);
@@ -325,13 +336,14 @@ test('11. pending persistence does not block publish', async () => {
   bus.subscribe('research.bias.updated', () => order.push('publish'));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
   const startTime = Date.now();
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
   const elapsed = Date.now() - startTime;
 
   // publish should fire immediately (not wait 100ms)
@@ -352,13 +364,14 @@ test('12. pending persistence does not block run() return', async () => {
   };
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
   const startTime = Date.now();
-  const report = await pipeline.run('BTC/USDT');
+  const report = await pipeline.run('bitget', 'BTC/USDT');
   const elapsed = Date.now() - startTime;
 
   assert.ok(report, 'run() returned report');
@@ -378,6 +391,7 @@ test('13. delayed rejection produces persistence_warning', async () => {
   };
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
@@ -385,7 +399,7 @@ test('13. delayed rejection produces persistence_warning', async () => {
 
   pipeline.on('persistence_warning', (w) => warnings.push(w));
 
-  const report = await pipeline.run('BTC/USDT');
+  const report = await pipeline.run('bitget', 'BTC/USDT');
 
   assert.ok(report, 'run() succeeded');
   
@@ -411,12 +425,13 @@ test('14. router call still happens before publish', async () => {
   bus.subscribe('research.bias.updated', () => order.push('publish'));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(order[0], 'router-called', 'router invoked first');
   assert.equal(order[1], 'publish', 'publish fired second');
@@ -432,12 +447,13 @@ test('15. original 10 tests still pass (regression guard)', async () => {
   bus.subscribe('research.bias.updated', (e) => events.push(e));
 
   const pipeline = new SlowPipeline({
+      exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
   });
 
-  await pipeline.run('BTC/USDT');
+  await pipeline.run('bitget', 'BTC/USDT');
 
   assert.equal(events.length, 1, 'still publishes once');
   assert.equal(router.updateCalled, 1, 'still calls router');

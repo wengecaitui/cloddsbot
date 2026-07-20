@@ -1,14 +1,19 @@
 /**
- * Kill Switch — 硬限制执行器
+ * Kill Switch — hard-limit executor
  *
- * 职责：
- *  1. 单笔仓位上限
- *  2. 日亏损上限
- *  3. Write-Action 工具超时强切（1.5s）
- *  4. 熔断后自动进入防守模式
+ * Responsibilities:
+ *  1. Single position cap
+ *  2. Daily loss cap
+ *  3. Write-Action tool timeout lock-out (1.5s)
+ *  4. Auto-enter defense mode on circuit-breaker trip
+ *
+ * Stage 3B4C4: exchange-bound. Every KillSwitch is constructed with an ExchangeId
+ * and every method validates `exchange === this.exchange` before mutating state.
  */
 
 import { EventEmitter } from 'events';
+import type { ExchangeId } from '../data/MarketIdentity';
+import { assertExchangeId } from '../data/MarketIdentity';
 
 export interface KillSwitchConfig {
   /** 单笔最大仓位占总仓位比例，默认 0.15 (15%) */
@@ -37,6 +42,8 @@ const DEFAULT_KILLSWITCH_CONFIG: KillSwitchConfig = {
 };
 
 export interface RiskSnapshot {
+  /** Stage 3B4C4: exchange this snapshot belongs to. */
+  readonly exchange: ExchangeId;
   /** 当前敞口（USD） */
   currentExposureUsd: number;
   /** 今日已实现亏损（USD） */
@@ -52,12 +59,19 @@ export interface RiskSnapshot {
 }
 
 export class KillSwitch extends EventEmitter {
+  /** Stage 3B4C4: exchange this KillSwitch is bound to. */
+  readonly exchange: ExchangeId;
   private config: KillSwitchConfig;
   private dailyLossUsd: number = 0;
   private isLocked: boolean = false;
 
-  constructor(config: KillSwitchConfig = DEFAULT_KILLSWITCH_CONFIG) {
+  constructor(
+    exchange: ExchangeId,
+    config: KillSwitchConfig = DEFAULT_KILLSWITCH_CONFIG,
+  ) {
     super();
+    assertExchangeId('KillSwitch', exchange);
+    this.exchange = exchange;
     this.config = {
       maxSinglePositionPct: config.maxSinglePositionPct ?? 0.15,  // 15%
       totalCapitalUsd: config.totalCapitalUsd ?? 10000,           // $10k 默认
@@ -68,6 +82,15 @@ export class KillSwitch extends EventEmitter {
     };
   }
 
+  /** Stage 3B4C4: validate that `exchange` matches this KillSwitch's binding. */
+  private assertBoundExchange(exchange: ExchangeId): void {
+    if (exchange !== this.exchange) {
+      throw new Error(
+        `KillSwitch: exchange mismatch: got ${JSON.stringify(exchange)}, expected ${JSON.stringify(this.exchange)}`,
+      );
+    }
+  }
+
   /** 计算单笔上限（USD）= totalCapital × maxSinglePositionPct，再与绝对上限取 min */
   getSinglePositionLimitUsd(): number {
     const pctLimit = this.config.totalCapitalUsd * this.config.maxSinglePositionPct;
@@ -75,7 +98,13 @@ export class KillSwitch extends EventEmitter {
   }
 
   /** 检查是否允许下单 */
-  check(symbol: string, positionUsd: number): { allowed: boolean; reason?: string } {
+  check(
+    exchange: ExchangeId,
+    symbol: string,
+    positionUsd: number,
+  ): { allowed: boolean; reason?: string } {
+    this.assertBoundExchange(exchange);
+
     if (!this.config.enabled) return { allowed: true };
 
     const limit = this.getSinglePositionLimitUsd();
@@ -100,7 +129,8 @@ export class KillSwitch extends EventEmitter {
   }
 
   /** 记录亏损 */
-  recordLoss(usd: number): void {
+  recordLoss(exchange: ExchangeId, usd: number): void {
+    this.assertBoundExchange(exchange);
     this.dailyLossUsd += usd;
     if (this.config.dailyMaxLossUsd != null && this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
       this.isLocked = true;
@@ -109,21 +139,25 @@ export class KillSwitch extends EventEmitter {
   }
 
   /** 强制锁定（超时触发） */
-  lock(reason: string): void {
+  lock(exchange: ExchangeId, reason: string): void {
+    this.assertBoundExchange(exchange);
     this.isLocked = true;
     this.emit('lock', { reason });
   }
 
   /** 解锁（新交易日） */
-  unlock(): void {
+  unlock(exchange: ExchangeId): void {
+    this.assertBoundExchange(exchange);
     this.isLocked = false;
     this.dailyLossUsd = 0;
     this.emit('unlock');
   }
 
   /** 获取当前快照 */
-  snapshot(): RiskSnapshot {
+  snapshot(exchange: ExchangeId): RiskSnapshot {
+    this.assertBoundExchange(exchange);
     return {
+      exchange: this.exchange,
       currentExposureUsd: 0,  // TODO: 从账户状态读取
       todayRealizedLossUsd: this.dailyLossUsd,
       todayUnrealizedLossUsd: 0,

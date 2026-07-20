@@ -29,6 +29,7 @@ function defaultConfig() {
 }
 
 const EMPTY_REPORT: MarketBiasReportFull = {
+  exchange: 'bitget',
   timestamp: 0, updatedAt: 0,
   globalBias: 'neutral', confidence: 0,
   assets: [],
@@ -221,6 +222,7 @@ test('UM13. Research expansion disabled (default)', () => {
     maxSymbols: 4,
   });
   const report: MarketBiasReportFull = {
+    exchange: 'bitget',
     ...EMPTY_REPORT,
     whitelist: ['SOL/USDT', 'DOGE/USDT'],
   };
@@ -236,6 +238,7 @@ test('UM14. Research expansion enabled but bounded by allowedSymbols', () => {
     allowResearchExpansion: true,
   });
   const report: MarketBiasReportFull = {
+    exchange: 'bitget',
     ...EMPTY_REPORT,
     whitelist: ['SOL/USDT', 'FAKE/COIN'],
   };
@@ -247,6 +250,7 @@ test('UM14. Research expansion enabled but bounded by allowedSymbols', () => {
 test('UM15. report blacklist temporarily removes', () => {
   const um = createUniverseManager(defaultConfig());
   const report: MarketBiasReportFull = {
+    exchange: 'bitget',
     ...EMPTY_REPORT,
     whitelist: [],
     blacklist: ['BTC/USDT'],
@@ -269,6 +273,7 @@ test('UM16. Research expansion does not modify existing intervals', () => {
   // Add ETH/USDT with custom intervals
   um.addSymbol('ETH/USDT', ['1h']);
   const report: MarketBiasReportFull = {
+    exchange: 'bitget',
     ...EMPTY_REPORT,
     whitelist: ['ETH/USDT', 'SOL/USDT'],
   };
@@ -331,11 +336,13 @@ test('UM22. research blacklist does not modify hardBlacklist', () => {
   });
   // First report blacklists SOL/USDT
   const report1: MarketBiasReportFull = {
+    exchange: 'bitget',
     ...EMPTY_REPORT, blacklist: ['SOL/USDT'],
   };
   um.applyResearchReport(report1);
   // Second report (without blacklist) should allow adding SOL/USDT
   const report2: MarketBiasReportFull = {
+    exchange: 'bitget',
     ...EMPTY_REPORT, whitelist: ['SOL/USDT'],
   };
   const r2 = um.applyResearchReport(report2);

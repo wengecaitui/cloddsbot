@@ -38,6 +38,7 @@ const kline: WsKline = {
 };
 const unconfirmed: WsKline = { ...kline, confirm: false };
 const report = {
+  exchange: 'bitget' as const,
   timestamp: 1000,
   meta: { source: 'hermes_cron' as const, modelVersion: '1.0', generationTimeMs: 100, inputSummary: '' },
 } as MarketBiasReportFull;
@@ -346,4 +347,63 @@ test('21. event payload exposes no standalone `source` field — provenance is o
   assert.ok(captured, 'event delivered');
   assert.equal('source' in captured, false, 'event payload must not surface a top-level `source` field');
   assert.equal(captured.kline.exchange, 'bitget', 'provenance accessible via kline.exchange only');
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3B4C4: research.bias.updated exchange provenance tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('22. research.bias.updated rejects missing exchange on report', () => {
+  const bus = createTradingEventBus();
+  let called = false;
+  bus.subscribe('research.bias.updated', () => { called = true; });
+  const reportWithoutExchange = { ...report };
+  delete (reportWithoutExchange as any).exchange;
+  assert.throws(
+    () => bus.publish('research.bias.updated', { report: reportWithoutExchange as any, receivedAt: 0 }),
+    InvalidExchangeProvenanceError,
+  );
+  assert.equal(called, false, 'subscriber not called');
+});
+
+test('23. research.bias.updated rejects coinbase exchange', () => {
+  const bus = createTradingEventBus();
+  let called = false;
+  bus.subscribe('research.bias.updated', () => { called = true; });
+  const badReport = { ...report, exchange: 'coinbase' as any };
+  assert.throws(
+    () => bus.publish('research.bias.updated', { report: badReport as any, receivedAt: 0 }),
+    InvalidExchangeProvenanceError,
+  );
+  assert.equal(called, false);
+});
+
+test('24. research.bias.updated rejects BITGET (case variant)', () => {
+  const bus = createTradingEventBus();
+  let called = false;
+  bus.subscribe('research.bias.updated', () => { called = true; });
+  const badReport = { ...report, exchange: 'BITGET' as any };
+  assert.throws(
+    () => bus.publish('research.bias.updated', { report: badReport as any, receivedAt: 0 }),
+    InvalidExchangeProvenanceError,
+  );
+  assert.equal(called, false);
+});
+
+test('25. research.bias.updated with valid exchange passes provenance', () => {
+  const bus = createTradingEventBus();
+  let captured: any = null;
+  bus.subscribe('research.bias.updated', (e) => { captured = e; });
+  const result = bus.publish('research.bias.updated', { report, receivedAt: 0 });
+  assert.equal(result.failures, 0);
+  assert.ok(captured);
+  assert.equal((captured as any).type, 'research.bias.updated');
+});
+
+test('26. provenance rejection on bias does not consume sequence', () => {
+  const bus = createTradingEventBus();
+  const badReport = { ...report, exchange: 'coinbase' as any };
+  assert.throws(() => bus.publish('research.bias.updated', { report: badReport as any, receivedAt: 0 }));
+  const r = bus.publish('market.ticker.updated', { ticker, receivedAt: 0 });
+  assert.equal(r.sequence, 1, 'provenance rejection did not consume sequence');
 });

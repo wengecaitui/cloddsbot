@@ -1,6 +1,10 @@
 /**
  * ExecutionRouter — 快慢分道路由引擎
  *
+ * Stage 3B4C4: exchange-bound. Each ExecutionRouter is constructed with an ExchangeId
+ * and every signal/report/decision carries the exchange. Exchange-scoped ReportStore
+ * writes to bias.${exchange}.json. Mismatched exchange throws synchronously.
+ *
  * 职责：
  *  1. 根据信号来源（Hermes Cron / Spread-Scanner）硬分流
  *  2. 1.5s 超时中断 → KillSwitch
@@ -9,8 +13,11 @@
 
 import { EventEmitter } from 'events';
 import { providers } from '../providers';
+import type { ExchangeId } from '../data/MarketIdentity';
+import { assertExchangeId, isExchangeId } from '../data/MarketIdentity';
 import { KillSwitch } from './KillSwitch';
-import { MarketBiasReport, MarketBiasReportFull } from '../types/market-bias';
+import type { ReportStoreConfig } from '../store/ReportStore';
+import type { MarketBiasReport, MarketBiasReportFull } from '../types/market-bias';
 
 export enum SignalSource {
   /** Hermes Cron 定时扫描（每小时） */
@@ -29,6 +36,8 @@ export enum ExecutionPath {
 }
 
 export interface RouteDecision {
+  /** Stage 3B4C4: exchange this decision belongs to. */
+  readonly exchange: ExchangeId;
   /** 选定的执行路径 */
   path: ExecutionPath;
   /** 信号来源 */
@@ -42,12 +51,16 @@ export interface RouteDecision {
 }
 
 export interface RouterConfig {
+  /** Stage 3B4C4: exchange this router is bound to (required). */
+  readonly exchange: ExchangeId;
   /** 快路径超时（秒），默认 1.5s */
-  fastPathTimeoutSec: number;
+  readonly fastPathTimeoutSec: number;
   /** MarketBiasReport 最大年龄（小时），默认 2 小时 */
-  maxBiasReportAgeHours: number;
+  readonly maxBiasReportAgeHours: number;
   /** Kill Switch 配置 */
-  killSwitch: KillSwitch;
+  readonly killSwitch: KillSwitch;
+  /** Stage 3B4C4-R2: Optional ReportStore directory/tmpSuffix (NOT filename). */
+  readonly reportStoreConfig?: Omit<ReportStoreConfig, 'filename'>;
 }
 
 /**
@@ -64,11 +77,23 @@ export interface RouterConfig {
  * └─────────────────────────────┴──────────────┴─────────────┘
  */
 export class ExecutionRouter extends EventEmitter {
+  /** Stage 3B4C4: exchange this router is bound to. */
+  readonly exchange: ExchangeId;
   private config: RouterConfig;
   private biasReport: MarketBiasReportFull | null = null;
 
   constructor(config: RouterConfig) {
     super();
+    assertExchangeId('ExecutionRouter', config.exchange);
+
+    // Stage 3B4C4-R2: killSwitch must be bound to the same exchange
+    if (config.killSwitch.exchange !== config.exchange) {
+      throw new Error(
+        `ExecutionRouter: killSwitch.exchange (${config.killSwitch.exchange}) !== config.exchange (${config.exchange})`,
+      );
+    }
+
+    this.exchange = config.exchange;
     this.config = config;
   }
 
@@ -84,16 +109,26 @@ export class ExecutionRouter extends EventEmitter {
   /**
    * 根据信号来源决定执行路径
    *
-   * 这是唯一的入口点，所有调用必须通过此方法
+   * Stage 3B4C4: validates signal.exchange === this.exchange before routing.
+   * Mismatched exchange throws synchronously (fail closed).
    */
   route(signal: {
+    exchange: ExchangeId;
     source: SignalSource;
     symbol?: string;
     signalData?: Record<string, unknown>;
   }): RouteDecision {
+    // Stage 3B4C4: exchange mismatch — fail closed before routing
+    if (signal.exchange !== this.exchange) {
+      throw new Error(
+        `ExecutionRouter.route: signal.exchange (${signal.exchange}) !== router.exchange (${this.exchange})`,
+      );
+    }
+
     // 硬分流规则 1：Cron → Slow
     if (signal.source === SignalSource.HERMES_CRON) {
       return {
+        exchange: this.exchange,
         path: ExecutionPath.SLOW,
         source: signal.source,
         reason: 'Cron-triggered → mandatory Slow Path (research pipeline)',
@@ -105,6 +140,7 @@ export class ExecutionRouter extends EventEmitter {
     // 硬分流规则 2：Spread-Scanner → Fast
     if (signal.source === SignalSource.SPREAD_SCANNER) {
       return {
+        exchange: this.exchange,
         path: ExecutionPath.FAST,
         source: signal.source,
         reason: 'Spread signal → mandatory Fast Path (execution pipeline)',
@@ -115,6 +151,7 @@ export class ExecutionRouter extends EventEmitter {
 
     // 兜底：手动触发 → 根据上下文选择
     return {
+      exchange: this.exchange,
       path: this.hasActivePositions() ? ExecutionPath.FAST : ExecutionPath.SLOW,
       source: signal.source,
       reason: 'Manual trigger → context-based routing',
@@ -129,16 +166,33 @@ export class ExecutionRouter extends EventEmitter {
 
   /**
    * 更新 MarketBiasReport（由慢路径写入）
-   * 同时原子写入磁盘（防 I/O 竞态）
+   *
+   * Stage 3B4C4: validates report.exchange === this.exchange BEFORE updating
+   * memory, emitting events, or writing to disk. Exchange-scoped filename.
    */
   async updateBiasReport(report: MarketBiasReportFull): Promise<void> {
-    this.biasReport = report;
-    this.emit('bias_updated', { report, ageHours: 0 });
+    // Stage 3B4C4: validate exchange provenance before ANY mutation
+    if (!isExchangeId((report as { exchange?: unknown }).exchange)) {
+      throw new Error(
+        `ExecutionRouter.updateBiasReport: report.exchange is not a valid ExchangeId: ${JSON.stringify((report as { exchange?: unknown }).exchange)}`,
+      );
+    }
+    if ((report as { exchange: ExchangeId }).exchange !== this.exchange) {
+      throw new Error(
+        `ExecutionRouter.updateBiasReport: report.exchange (${report.exchange}) !== router.exchange (${this.exchange})`,
+      );
+    }
 
-    // 原子写入磁盘（SlowPipeline → ReportStore）
+    this.biasReport = report;
+    this.emit('bias_updated', { exchange: this.exchange, report, ageHours: 0 });
+
+    // Stage 3B4C4: exchange-scoped atomic write to bias.${exchange}.json
     try {
       const { ReportStore } = await import('../store/ReportStore');
-      const store = new ReportStore();
+      const store = new ReportStore({
+        ...this.config.reportStoreConfig,
+        filename: `bias.${this.exchange}.json`,
+      });
       await store.write(report);
     } catch (err) {
       // 磁盘写入失败不影响内存流程
@@ -148,12 +202,25 @@ export class ExecutionRouter extends EventEmitter {
 
   /**
    * 从磁盘读取 MarketBiasReport（FastPipeline 启动时或内存为空时调用）
+   *
+   * Stage 3B4C4: reads exchange-scoped file. Returns null if file missing,
+   * report missing exchange, invalid exchange, or mismatched exchange.
    */
   async loadBiasReportFromDisk(): Promise<MarketBiasReportFull | null> {
     try {
       const { ReportStore } = await import('../store/ReportStore');
-      const store = new ReportStore();
-      return store.read<MarketBiasReportFull>();
+      const store = new ReportStore({
+        ...this.config.reportStoreConfig,
+        filename: `bias.${this.exchange}.json`,
+      });
+      const raw = await store.read<MarketBiasReportFull>();
+      if (!raw) return null;
+
+      // Stage 3B4C4: validate exchange on disk-loaded report
+      if (!isExchangeId((raw as { exchange?: unknown }).exchange)) return null;
+      if ((raw as { exchange: ExchangeId }).exchange !== this.exchange) return null;
+
+      return raw;
     } catch {
       return null;
     }
@@ -178,7 +245,7 @@ export class ExecutionRouter extends EventEmitter {
   }
 
   private hasActivePositions(): boolean {
-    return this.config.killSwitch.snapshot().openPositions > 0;
+    return this.config.killSwitch.snapshot(this.exchange).openPositions > 0;
   }
 
   // =============================================
@@ -187,12 +254,13 @@ export class ExecutionRouter extends EventEmitter {
 
   /**
    * 检查 Write-Action 工具是否超时
-   * 快路径执行时调用，超过 1.5s 无响应 → 触发 KillSwitch
+   * Stage 3B4C4: passes `this.exchange` to killSwitch.lock
    */
   checkFastPathTimeout(startTime: number): { timedOut: boolean; elapsedMs: number } {
     const elapsedMs = Date.now() - startTime;
     if (elapsedMs > this.config.fastPathTimeoutSec * 1000) {
       this.config.killSwitch.lock(
+        this.exchange,
         `Fast path timeout: ${elapsedMs}ms > ${this.config.fastPathTimeoutSec * 1000}ms`
       );
       return { timedOut: true, elapsedMs };

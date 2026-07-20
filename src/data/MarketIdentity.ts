@@ -1,4 +1,4 @@
-// Stage 3B4C1 + 3B4C1-R1 + 3B4C2: Exchange-aware market identity
+// Stage 3B4C1 + 3B4C1-R1 + 3B4C2 + 3B4C4: Exchange-aware market identity
 //
 // Single canonical definition of ExchangeId and ExchangeAwareMarketData.
 // Imported by data layer (types.ts, Collectors), runtime layer (PlanAwareCollector,
@@ -23,6 +23,10 @@
 //     structured fields always travel with the value.
 //   - Internal: only used as Map string key; never persisted to disk, never
 //     surfaced in API responses, never logged.
+//
+// Stage 3B4C4: assertExchangeId — runtime assertion narrowing helper.
+// Used by KillSwitch, ExecutionRouter, SlowPipeline, FastPipeline, TradingRuntime
+// to fail closed on exchange mismatch during construction.
 
 export type ExchangeId = 'bitget' | 'binance';
 
@@ -47,6 +51,31 @@ export interface ExchangeAwareMarketData {
  */
 export function isExchangeId(value: unknown): value is ExchangeId {
   return value === 'bitget' || value === 'binance';
+}
+
+/**
+ * Stage 3B4C4: Runtime assertion for ExchangeId.
+ *
+ * Throws synchronously if `exchange` is not a valid ExchangeId.
+ * The error message includes `componentName` for traceability.
+ * This does NOT set a default exchange, does NOT coerce case,
+ * does NOT infer from symbol/URL/config.
+ *
+ * On success, narrows `exchange` from unknown to ExchangeId so the
+ * caller can use it without further type guards.
+ *
+ * Used at construction boundaries (KillSwitch, ExecutionRouter, etc.)
+ * to fail closed on invalid provenance at the earliest possible moment.
+ */
+export function assertExchangeId(
+  componentName: string,
+  exchange: unknown,
+): asserts exchange is ExchangeId {
+  if (!isExchangeId(exchange)) {
+    throw new Error(
+      `${componentName}: invalid exchange: ${JSON.stringify(exchange)}`,
+    );
+  }
 }
 
 /**

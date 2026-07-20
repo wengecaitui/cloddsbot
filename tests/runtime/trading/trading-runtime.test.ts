@@ -974,7 +974,7 @@ test('40. router + routerConfig throws (3A7 5)', () => {
     universe: makeUniverse(),
     collectorFactory: () => new FakeColl(),
     indicatorService: new FakeIS() as any,
-    router: new ExecutionRouter({ fastPathTimeoutSec: 1, maxBiasReportAgeHours: 2, killSwitch: new KillSwitch() }),
+    router: new ExecutionRouter({ exchange: 'bitget', fastPathTimeoutSec: 1, maxBiasReportAgeHours: 2, killSwitch: new KillSwitch('bitget') }),
     routerConfig: {},
   } as any), /cannot provide both/);
 });

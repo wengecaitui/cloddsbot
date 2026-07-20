@@ -6,7 +6,11 @@
  * 快路径（Execution Pipeline）读取此报告作为决策依据
  */
 
+import type { ExchangeId } from '../data/MarketIdentity';
+
 export interface MarketBiasReport {
+  /** Stage 3B4C4: exchange this report belongs to (required, provenance). */
+  readonly exchange: ExchangeId;
   /** 报告生成时间戳（毫秒） */
   timestamp: number;
   /** 报告最后更新时间戳（毫秒）— 用于过期检测，防止僵尸报告 */

@@ -25,13 +25,14 @@ import { MarketBiasReportFull } from '../types/market-bias.js';
 // ── Helpers ──────────────────────────────────────────────────────
 
 function makeRouter(): ExecutionRouter {
-  const ks = new KillSwitch({
+  const ks = new KillSwitch('bitget', {
     maxSinglePositionPct: 0.15,
     totalCapitalUsd: 10000,
     writeActionTimeoutSec: 2,
     enabled: false,
   });
   const router = new ExecutionRouter({
+    exchange: 'bitget',
     fastPathTimeoutSec: 1.5,
     maxBiasReportAgeHours: 2,
     killSwitch: ks,
@@ -41,6 +42,7 @@ function makeRouter(): ExecutionRouter {
 
 function makeBiasReport(now: number, symbol: string): MarketBiasReportFull {
   return {
+    exchange: 'bitget',
     timestamp: now,
     updatedAt: now,
     globalBias: 'bullish',

@@ -30,9 +30,11 @@ export interface TradingRuntimeOptions {
   readonly clock?: Clock;
   readonly router?: ExecutionRouter;
   readonly routerConfig?: {
-    fastPathTimeoutSec?: number;
-    maxBiasReportAgeHours?: number;
-    killSwitch?: KillSwitch;
+    readonly fastPathTimeoutSec?: number;
+    readonly maxBiasReportAgeHours?: number;
+    readonly killSwitch?: KillSwitch;
+    /** Stage 3B4C4-R2: Optional ReportStore directory/tmpSuffix (NOT filename). */
+    readonly reportStoreConfig?: Omit<import('../../store/ReportStore').ReportStoreConfig, 'filename'>;
   };
   readonly candleCapacity?: number;
   readonly staleAfterMs?: number;
@@ -149,14 +151,33 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
 
   let router: ExecutionRouter;
   if (options.router) {
+    // Stage 3B4C4: validate caller-injected router is exchange-bound to this runtime
+    if (options.router.exchange !== exchange) {
+      throw new Error(
+        `TradingRuntime: injected router.exchange (${options.router.exchange}) !== runtime exchange (${exchange})`,
+      );
+    }
+    if (options.router.killSwitch.exchange !== exchange) {
+      throw new Error(
+        `TradingRuntime: injected router.killSwitch.exchange (${options.router.killSwitch.exchange}) !== runtime exchange (${exchange})`,
+      );
+    }
     router = options.router;
   } else {
     const rc = options.routerConfig ?? {};
-    const ks = rc.killSwitch ?? new KillSwitch();
+    // Stage 3B4C4: validate injected killSwitch is bound to this exchange
+    if (rc.killSwitch && rc.killSwitch.exchange !== exchange) {
+      throw new Error(
+        `TradingRuntime: injected killSwitch.exchange (${rc.killSwitch.exchange}) !== runtime exchange (${exchange})`,
+      );
+    }
+    const ks = rc.killSwitch ?? new KillSwitch(exchange);
     router = new ExecutionRouter({
+      exchange,
       fastPathTimeoutSec: rc.fastPathTimeoutSec ?? 1.5,
       maxBiasReportAgeHours: rc.maxBiasReportAgeHours ?? 2,
       killSwitch: ks,
+      reportStoreConfig: rc.reportStoreConfig,
     });
   }
 
@@ -212,7 +233,8 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
   const maxKlineAgeMs = options.maxKlineAgeMs ?? 120_000;
 
   const fastPipeline = new FastPipeline({
-    router: router as any,
+    exchange,
+    router,
     indicatorService: options.indicatorService,
     marketData: {
       // Stage 3B4C2: bind this pipeline to the runtime's exchange — no fallback.
@@ -225,7 +247,8 @@ export function createTradingRuntime(options: TradingRuntimeOptions): TradingRun
 
   const spc = options.slowPipelineConfig ?? {};
   const slowPipeline = new SlowPipeline({
-    router: router as any,
+    exchange,
+    router,
     bus, clock,
     model: spc.model,
     adapterScript: spc.adapterScript,

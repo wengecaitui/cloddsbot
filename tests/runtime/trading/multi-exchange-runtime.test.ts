@@ -1526,35 +1526,22 @@ test('51. both stop fail -> parent failed', async () => {
 
 // 52. Real shared KillSwitch via distinct ExecutionRouters
 test('52. real shared kill switch via distinct routers', () => {
-  const sharedKs = new KillSwitch();
+  const sharedKs = new KillSwitch('bitget');
   const bitgetRouter = new ExecutionRouter({
+    exchange: 'bitget',
     fastPathTimeoutSec: 1.5,
     maxBiasReportAgeHours: 2,
     killSwitch: sharedKs,
   });
-  const binanceRouter = new ExecutionRouter({
-    fastPathTimeoutSec: 1.5,
-    maxBiasReportAgeHours: 2,
-    killSwitch: sharedKs,
-  });
-  // Routers themselves must be distinct
-  assert.notEqual(bitgetRouter, binanceRouter);
-
-  const bOpts = bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
-  const nOpts = binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
-  // rm routerConfig so runtime.router takes priority
-  delete (bOpts.runtime as any).routerConfig;
-  delete (nOpts.runtime as any).routerConfig;
-  bOpts.runtime = { ...bOpts.runtime, router: bitgetRouter };
-  nOpts.runtime = { ...nOpts.runtime, router: binanceRouter };
-
+  // Stage 3B4C4: cross-binding check — binance router rejects KS with wrong exchange
   assert.throws(
-    () => createMultiExchangeRuntime({ bitget: bOpts as any, binance: nOpts as any }),
-    (err: unknown) => {
-      assert.ok(err instanceof MultiExchangeIsolationError);
-      assert.equal((err as MultiExchangeIsolationError).resource, 'router.killSwitch');
-      return true;
-    },
+    () => new ExecutionRouter({
+      exchange: 'binance',
+      fastPathTimeoutSec: 1.5,
+      maxBiasReportAgeHours: 2,
+      killSwitch: sharedKs,
+    }),
+    /killSwitch\.exchange/,
   );
 });
 
@@ -1569,26 +1556,87 @@ test('53. shared indicator service does not trigger isolation', () => {
   assert.notEqual(multi.getRuntime('bitget').bus, multi.getRuntime('binance').bus);
 });
 
-// 54. Real shared router rejected — inject same ExecutionRouter via TradingRuntimeOptions
-test('54. real shared router rejected by createMultiExchangeRuntime', () => {
+// 54. TradingRuntime rejects injected router with wrong exchange
+test('54. TradingRuntime rejects injected router with wrong exchange', () => {
   const sharedRouter = new ExecutionRouter({
+    exchange: 'bitget',
     fastPathTimeoutSec: 1.5,
     maxBiasReportAgeHours: 2,
-    killSwitch: new KillSwitch(),
+    killSwitch: new KillSwitch('bitget'),
   });
-  const bOpts = bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
   const nOpts = binanceOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler());
-  delete (bOpts.runtime as any).routerConfig;
+  // Inject the bitget router into binance opts — should fail at TradingRuntime constructor
   delete (nOpts.runtime as any).routerConfig;
-  bOpts.runtime = { ...bOpts.runtime, router: sharedRouter };
   nOpts.runtime = { ...nOpts.runtime, router: sharedRouter };
 
+  // Stage 3B4C4: TradingRuntime validates router.exchange === exchange
+  // Injecting a bitget router into a binance runtime should throw
   assert.throws(
-    () => createMultiExchangeRuntime({ bitget: bOpts as any, binance: nOpts as any }),
-    (err: unknown) => {
-      assert.ok(err instanceof MultiExchangeIsolationError);
-      assert.equal((err as MultiExchangeIsolationError).resource, 'router');
-      return true;
-    },
+    () => createMultiExchangeRuntime({ bitget: bitgetOpts(makeUniverse(), new FakeWSFactory(), new FakeScheduler()) as any, binance: nOpts as any }),
+    /router.exchange/,
   );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Stage 3B4C4: Exchange-identity tests
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 55. Router exchange identity on Bitget side
+test('55. Bitget runtime router exchange identity', () => {
+  const fB = new FakeWSFactory();
+  const sB = new FakeScheduler();
+  const fN = new FakeWSFactory();
+  const sN = new FakeScheduler();
+  const multi = createMultiExchangeRuntime({
+    bitget: bitgetOpts(makeUniverse(), fB, sB),
+    binance: binanceOpts(makeUniverse(), fN, sN),
+  });
+  assert.equal(multi.getRuntime('bitget').router.exchange, 'bitget');
+});
+
+// 56. Router exchange identity on Binance side
+test('56. Binance runtime router exchange identity', () => {
+  const fB = new FakeWSFactory();
+  const sB = new FakeScheduler();
+  const fN = new FakeWSFactory();
+  const sN = new FakeScheduler();
+  const multi = createMultiExchangeRuntime({
+    bitget: bitgetOpts(makeUniverse(), fB, sB),
+    binance: binanceOpts(makeUniverse(), fN, sN),
+  });
+  assert.equal(multi.getRuntime('binance').router.exchange, 'binance');
+});
+
+// 57. KillSwitch exchange identity bound through router
+test('57. KillSwitch exchange identity bound through router', () => {
+  const fB = new FakeWSFactory();
+  const sB = new FakeScheduler();
+  const fN = new FakeWSFactory();
+  const sN = new FakeScheduler();
+  const multi = createMultiExchangeRuntime({
+    bitget: bitgetOpts(makeUniverse(), fB, sB),
+    binance: binanceOpts(makeUniverse(), fN, sN),
+  });
+  assert.equal(multi.getRuntime('bitget').router.killSwitch.exchange, 'bitget');
+  assert.equal(multi.getRuntime('binance').router.killSwitch.exchange, 'binance');
+});
+
+// 58. RiskSnapshot exchange distinct per side
+test('58. RiskSnapshot exchange distinct per side', () => {
+  const fB = new FakeWSFactory();
+  const sB = new FakeScheduler();
+  const fN = new FakeWSFactory();
+  const sN = new FakeScheduler();
+  const multi = createMultiExchangeRuntime({
+    bitget: bitgetOpts(makeUniverse(), fB, sB),
+    binance: binanceOpts(makeUniverse(), fN, sN),
+  });
+  const bitSnapshot = multi.getRuntime('bitget').router.killSwitch.snapshot('bitget');
+  const binSnapshot = multi.getRuntime('binance').router.killSwitch.snapshot('binance');
+  assert.equal(bitSnapshot.exchange, 'bitget');
+  assert.equal(binSnapshot.exchange, 'binance');
+  // Independent: a lock on bitget does not affect binance
+  multi.getRuntime('bitget').router.killSwitch.lock('bitget', 'test lock');
+  const binAfterLock = multi.getRuntime('binance').router.killSwitch.snapshot('binance');
+  assert.equal(binAfterLock.isTriggered, false, 'binance not affected by bitget lock');
 });
