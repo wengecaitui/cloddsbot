@@ -132,6 +132,7 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register $TriggerMode scheduled task for
         -Settings $settings `
         -Principal $principal `
         -Description $description `
+        -ErrorAction Stop `
         -Force | Out-Null
 
     Write-OperationRecord -Action 'scheduled_task.registered' -OperationsRoot $runtime -Details @{
@@ -146,12 +147,12 @@ if ($PSCmdlet.ShouldProcess($TaskName, "Register $TriggerMode scheduled task for
     }
 
     if ($StartNow) {
-        Start-ScheduledTask -TaskName $TaskName
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
         Write-OperationRecord -Action 'scheduled_task.started' -OperationsRoot $runtime -Details @{
             taskName = $TaskName
         }
     }
 
-    Get-ScheduledTask -TaskName $TaskName |
+    Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop |
         Select-Object TaskName, State, Author, Description
 }
