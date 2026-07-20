@@ -1230,31 +1230,54 @@ This is by design. 3B4C4 is an atomic type-propagation + validation layer, not a
 
 ## 11. Baseline Test Count (pre-migration)
 
-Exact test counts obtained from `node --test --import tsx` on each targeted suite. Counts are verified against actually-existing test files only.\n\nThe core baseline SHA changes per implementation. Reference the implementation-stage `git rev-parse HEAD`.
+All figures verified from physical log files in `.tmp-r3/` against current HEAD. No approximate counts.
 
-| Suite | File | Tests (exact) | Status |
-|---|---|---|---|
-| MultiExchangeRuntime | `tests/runtime/trading/multi-exchange-runtime.test.ts` | 56 | ✅ 56/56 |
-| TradingRuntime | `tests/runtime/trading/trading-runtime.test.ts` | 68 | ✅ 68/68 |
-| BitgetTradingRuntime | `tests/runtime/trading/bitget-trading-runtime.test.ts` | 46 | ✅ 46/46 |
-| BinanceTradingRuntime | `tests/runtime/trading/binance-trading-runtime.test.ts` | 16 | ✅ 16/16 |
-| ExchangeTradingRuntime | `tests/runtime/trading/exchange-trading-runtime.test.ts` | 15 | ✅ 15/15 |
-| ExchangeProvider | `tests/runtime/trading/exchange-market-data-provider.test.ts` | 20 | ✅ 20/20 |
-| MarketDataRuntime | `tests/runtime/market/market-data-runtime.test.ts` | 28 | ✅ 28/28 |
-| FastPipeline | `tests/pipeline/fast-pipeline-market.test.ts` | 18 | ✅ 18/18 |
-| SlowPipeline | `tests/pipeline/slow-pipeline.test.ts` | 24 | ✅ 24/24 |
-| MarketSnapshotStore | `tests/data/market-snapshot-store.test.ts` | 27 | ✅ 27/27 |
-| CandleSeriesStore | `tests/data/candle-series-store.test.ts` | 25 | ✅ 25/25 |
-| EventBus | `tests/events/trading-event-bus.test.ts` | 21 | ✅ 21/21 |
-| BitgetV2PublicCollector | `tests/data/bitget/bitget-v2-public-collector.test.ts` | 68 | ✅ 68/68 |
-| BinanceV2PublicCollector | `tests/data/binance/binance-v2-public-collector.test.ts` | 33 | ✅ 33/33 |
-| **Targeted subtotal** | _(14 suites — files that actually exist at HEAD)_ | **451** | — |
+### A. Core targeted baseline
 
-**Note on removed rows:** Prior revisions of this document listed `tests/router/kill-switch.test.ts` (27 tests), `tests/router/execution-router.test.ts` (32 tests), and `tests/store/report-store.test.ts` (8 tests) — none of these files exist in the repository. KillSwitch, ExecutionRouter, and ReportStore have no dedicated standalone test files. Their coverage is embedded in `tests/e2e/step-1-7-e2e.test.ts` (10 tests), `tests/runtime/trading/trading-runtime.test.ts` (68 tests), `tests/runtime/trading/multi-exchange-runtime.test.ts` (56 tests), `tests/pipeline/slow-pipeline.test.ts` (24 tests), and `tests/pipeline/fast-pipeline-market.test.ts` (18 tests), all of which are listed in the table above and counted toward the subtotal.
+Fresh run on the 14 core-affected suites (all exist at HEAD):
 
-**Note on SlowPipeline count:** The earlier R1 revision claimed 17 tests; re-running `node --test --import tsx tests/pipeline/slow-pipeline.test.ts` against current HEAD reports 24 tests. The 17 figure was an undercount.
+| Suite | File | Tests | Pass | Fail |
+|---|---|---|---|---|
+| MultiExchangeRuntime | `tests/runtime/trading/multi-exchange-runtime.test.ts` | 56 | 56 | 0 |
+| TradingRuntime | `tests/runtime/trading/trading-runtime.test.ts` | 68 | 68 | 0 |
+| BitgetTradingRuntime | `tests/runtime/trading/bitget-trading-runtime.test.ts` | 46 | 46 | 0 |
+| BinanceTradingRuntime | `tests/runtime/trading/binance-trading-runtime.test.ts` | 16 | 16 | 0 |
+| ExchangeTradingRuntime | `tests/runtime/trading/exchange-trading-runtime.test.ts` | 15 | 15 | 0 |
+| ExchangeProvider | `tests/runtime/trading/exchange-market-data-provider.test.ts` | 20 | 20 | 0 |
+| MarketDataRuntime | `tests/runtime/market/market-data-runtime.test.ts` | 28 | 28 | 0 |
+| FastPipeline | `tests/pipeline/fast-pipeline-market.test.ts` | 18 | 18 | 0 |
+| SlowPipeline | `tests/pipeline/slow-pipeline.test.ts` | 15 | 15 | 0 |
+| MarketSnapshotStore | `tests/data/market-snapshot-store.test.ts` | 27 | 27 | 0 |
+| CandleSeriesStore | `tests/data/candle-series-store.test.ts` | 25 | 25 | 0 |
+| EventBus | `tests/events/trading-event-bus.test.ts` | 21 | 21 | 0 |
+| BitgetV2PublicCollector | `tests/data/bitget/bitget-v2-public-collector.test.ts` | 68 | 68 | 0 |
+| BinanceV2PublicCollector | `tests/data/binance/binance-v2-public-collector.test.ts` | 33 | 33 | 0 |
+| **Total** | | **456** | **456** | **0** |
 
-**Note on `npm test` (full suite):** `npm test` runs 77 test files including the 14 targeted suites above plus 63 others (e2e, integration, observability, unit, recovery). The full suite has pre-existing failures unrelated to Stage 3B4C3/3B4C4. These pre-existing failures are unchanged by Stage 3B4C4-AUDIT (no production code modified). The targeted 14-suite regression (451 tests, all passing) is the relevant quality baseline for 3B4C4 implementation.
+All 456 core tests must be preserved after 3B4C4 implementation. New tests (MarketIdentity helper, MultiExchange exchange-binding, etc.) will raise the core total above 456.
+
+### B. Touched-suite baseline
+
+Fresh run on all 8 test-involved files (every file that will be touched during 3B4C4 implementation):
+
+| Metric | Value |
+|---|---|
+| Files | 8 |
+| Total tests | 237 |
+| Passing | 236 |
+| Failing | 1 |
+| Skipped | 0 |
+| Exit code | 1 |
+| Failing file | `tests/e2e/step-1-7-e2e.test.ts` |
+| Failure category | Pre-existing e2e infrastructure failure (unrelated to Stage 3B4C3/3B4C4 — persists without any source changes) |
+
+The 1 pre-existing failure must remain ≤1 after 3B4C4 implementation. All other files in this 8-file set must achieve 0 failures.
+
+### C. Full npm test
+
+Status: **incomplete**. `npm test` was initiated and ran for approximately 42 minutes before being killed. The last visible output was `TradingRuntime R17` — the test runner never reached the summary (`ℹ tests 77`). No summary line was captured.
+
+Full npm test results are not available to claim a definitive total/pass/fail count. The test runner is known to hang on pre-existing long-running suites (`tests/trading-safety.test.ts`, API Gateway tests). During 3B4C4 implementation, the same `npm test` invocation must run within the same timeout window. A before/after comparison of any completed suites within that window is required; incomplete is acceptable only if the same suites that hung before 3B4C4 also hang after — no new hung suites shall appear.
 
 ---
 
@@ -1286,19 +1309,48 @@ Exact test counts obtained from `node --test --import tsx` on each targeted suit
 | `src/data/types.ts` | `WsTicker`/`WsKline` already extend `ExchangeAwareMarketData` |
 | `src/events/TradingEvent.ts` | Event payload map unchanged — exchange arrives inside `report.exchange` |
 
-### Test files modified (7 test-involved files)
+### Test files modified (8 test-involved files)
 
-No dedicated `tests/router/kill-switch.test.ts`, `tests/router/execution-router.test.ts`, or `tests/store/report-store.test.ts` files exist. KillSwitch, ExecutionRouter, and ReportStore are tested through the embedded call sites in the files below. See §1C for exact line-level change inventory.
+No dedicated test files for KillSwitch, ExecutionRouter, or ReportStore exist. KillSwitch and ExecutionRouter are tested through the embedded call sites below. See §1C for exact line-level change inventory.
 
 | File | Phase | Test changes (brief) |
 |------|-------|----------------------|
-| `tests/e2e/step-1-7-e2e.test.ts` | 2,3,4,6,9 | KillSwitch `new` at line 28 gains exchange; ExecutionRouter `new` at line 34 config gains exchange; `makeBiasReport` fixture at line 42 gains `exchange: 'bitget'`; all `fp.execute()` calls gain exchange |
+| `tests/e2e/step-1-7-e2e.test.ts` | 2,3,4,6,9 | KillSwitch `new` at line 28 gains exchange; ExecutionRouter `new` at line 34 config gains exchange; `makeBiasReport` fixture gains `exchange: 'bitget'`; all `fp.execute()` calls gain exchange; ReportStore disk isolation tests added (≥3 new tests: `bias.bitget.json` + `bias.binance.json` coexistence, `fs.mkdtemp`-based temp directory, missing/mismatched exchange → null) |
 | `tests/pipeline/fast-pipeline-market.test.ts` | 2,6 | All 18 `new FastPipeline(...)` configs gain `exchange`; all `fp.execute()` signals gain `exchange`; mock router returns report with `exchange`; `FastPipelineResult.exchange` and `decision_made` assertions added |
 | `tests/pipeline/slow-pipeline.test.ts` | 4,5 | All 15+ `new SlowPipeline(...)` configs gain `exchange`; all `pipeline.run(exchange, symbol)` signatures updated (mock + fixtures) |
-| `tests/events/trading-event-bus.test.ts` | 7 | Fixture at line 43 gains `exchange: 'bitget'`; add 4 new exchange-validation tests |
+| `tests/events/trading-event-bus.test.ts` | 7 | Fixture at line 43 gains `exchange: 'bitget'`; add ≥4 new exchange-validation tests (missing/invalid/case-variant/valid report.exchange) |
 | `tests/runtime/trading/trading-runtime.test.ts` | 2,4,8 | `new KillSwitch` at line 28 gains exchange; `new ExecutionRouter` at line 977 config gains exchange; construction validates exchange-binding (68 existing tests pass) |
-| `tests/runtime/trading/multi-exchange-runtime.test.ts` | 2,4,8 | `new KillSwitch()` and `new ExecutionRouter(...)` configs gain exchange; add: `router.exchange`, `router.killSwitch.exchange`, `RiskSnapshot.exchange` distinctness tests (56 existing tests pass, +2+ new) |
+| `tests/runtime/trading/multi-exchange-runtime.test.ts` | 2,4,8 | `new KillSwitch()` and `new ExecutionRouter(...)` configs gain exchange; add ≥4 explicit exchange-identity tests (see below); existing 56 tests pass unchanged |
 | `tests/runtime/market/universe-manager.test.ts` | 1 | 7 `MarketBiasReportFull` fixture points gain `exchange` field |
+| `tests/data/market-identity.test.ts` | 1 | **New: assertExchangeId direct tests** — at least 10 explicit test cases added in Phase 1 (see contract below) |
+
+#### MarketIdentity assertExchangeId test contract (Phase 1)
+
+Added to `tests/data/market-identity.test.ts` during 3B4C4 implementation. 10 explicit `test()` blocks:
+
+| # | Input | Expected |
+|---|-------|----------|
+| 1 | `'bitget'` | Does not throw |
+| 2 | `'binance'` | Does not throw |
+| 3 | `'coinbase'` | Throws with componentName in message |
+| 4 | `'BITGET'` | Throws (case-sensitive) |
+| 5 | `''` (empty string) | Throws |
+| 6 | `undefined` | Throws |
+| 7 | `null` | Throws |
+| 8 | `0` / `1` / `NaN` / `Infinity` (numbers) | Throws |
+| 9 | `{}` / `[]` / `{exchange:'bitget'}` (objects) | Throws |
+| 10 | TypeScript narrowing: `const v: unknown = 'bitget'; assertExchangeId('Test', v); const _t: ExchangeId = v;` | Compiles (narrowing works) |
+
+#### MultiExchangeRuntime exchange-identity tests (Phase 8)
+
+Added to `tests/runtime/trading/multi-exchange-runtime.test.ts`. At least 4 explicit `test()` blocks:
+
+| # | Test | Assertion |
+|---|---|---|
+| 1 | `multi.getRuntime('bitget').router.exchange === 'bitget'` | router.exchange identity |
+| 2 | `multi.getRuntime('bitget').router.killSwitch.exchange === 'bitget'` | KS.exchange identity bound through router |
+| 3 | `multi.getRuntime('bitget').router.killSwitch.snapshot('bitget').exchange === 'bitget'` | RiskSnapshot.exchange distinct per side |
+| 4 | Exchange-specific report files coexist in same temp directory | `bias.bitget.json` and `bias.binance.json` both readable, content exchange correct |
 
 ### Commit plan (single atomic commit)
 
@@ -1324,24 +1376,25 @@ Single commit (working tree accumulated through internal order in §9):
     - src/events/TradingEventBus.ts: research.bias.updated provenance validation
     - src/runtime/trading/TradingRuntime.ts: composition root propagation + injected-component validation
 
-  Test changes (10 files):
-    - 5 suite-level fixture/signature updates (kill-switch, execution-router,
-      slow-pipeline, fast-pipeline-market, trading-event-bus)
-    - 5 call-site fixture updates (trading-runtime, multi-exchange-runtime,
-      e2e/step-1-7, universe-manager, report-store)
+  Test changes (8 files):
+    - 3 suite-level fixture/signature updates (fast-pipeline-market, slow-pipeline, trading-event-bus)
+    - 5 call-site fixture updates (e2e/step-1-7, trading-runtime, multi-exchange-runtime, universe-manager, market-identity)
 
   Verification:
     - npm run typecheck — 0 errors
     - npm run build — 0 errors
-    - Targeted regression: 451 tests across 14 suites (see §11 baseline) — 451/451 passing
-    - MultiExchangeRuntime: 56 + 2+ new tests ≈ 58+ tests
+    - Core targeted regression: 456 tests across 14 suites — 456/456 passing
+    - Touched-suite regression: 237 tests across 8 files — 236/237 passing (1 pre-existing e2e failure)
+    - MultiExchangeRuntime: 56 existing + ≥4 new exchange-identity tests = ≥60 tests
 
 3B4C4 acceptance criteria (implementation verification):
-      - Targeted 451 existing tests ALL preserved
-      - New tests raise targeted total > 451
-      - 3B4C4 target suites: 0 failed
-      - Full `npm test` list: zero new failures on files not already failing before 3B4C4
-      - Pre-existing failures tracked by before/after comparison (see §11)
+      - Core 456 existing tests ALL preserved
+      - Touched-suite 236 passing tests ALL preserved; 1 pre-existing failure ≤1
+      - New tests raise core total above 456
+      - 3B4C4 target suites: 0 new failures
+      - Full `npm test` before/after: zero new failures on files not already failing pre-3B4C4
+      - Pre-existing failures tracked in §11 baseline
+```
 ```
 
 After single commit + push, the chain is:
@@ -1358,6 +1411,6 @@ HEAD after:  <new sha>  (3B4C4 atomic implementation)
 | Rev | Date | Changes |
 |---|---|---|
 | 1 | 2026-07-19 | Initial audit (Stage 3B4C4-AUDIT): provenance gap table, confirmed known problems, canonical identity contract, type contract proposals, migration plan, test matrix |
-| 2 | 2026-07-19 | Stage 3B4C4-AUDIT-R1: corrected atomic strategy (single commit), §3D unified failure semantics, §3E explicit-vs-bound resolution, §1C exact call-site inventory via `rg`, §11 exact test baseline (451 across 14 suites), §12 single-commit plan (8 production files, 8 test-involved files) |
+| 2 | 2026-07-19 | Stage 3B4C4-AUDIT-R1: corrected atomic strategy (single commit), §3D unified failure semantics, §3E explicit-vs-bound resolution, §1C exact call-site inventory via `rg`, §11 exact test baseline (historical: 451 across 14 suites — later corrected to 456), §12 single-commit plan (8 production files, 8 test-involved files) |
 | 3 | 2026-07-19 | Stage 3B4C4-AUDIT-R2: removed non-existent test file references (`tests/router/kill-switch.test.ts`, `tests/router/execution-router.test.ts`, `tests/store/report-store.test.ts` — confirmed absent by fresh `rg` + `git ls-files`), §5 ReportStore temp-directory contract, §6 component cross-binding checks, §9 phase headers changed to "Internal working-tree phase — no commit", §2 Router memory + KillSwitch risk conclusions corrected |
-| 4 | 2026-07-19 | Stage 3B4C4-AUDIT-R3: fresh `rg` call-site scan (8 test-involved files confirmed), file existence check (3 non-existent files removed, 1 file added: `tests/data/market-identity.test.ts`), assertExchangeId test contract planned (≥7 new tests), touched-suite baseline (237 tests / 236 pass / 1 pre-existing fail in `tests/e2e/step-1-7-e2e.test.ts`), core targeted baseline (14 suites / 451 pass / 0 fail), full npm test noted as incomplete (timeout on pre-existing trade-safety + api-gateway suites), ReportStore test landing point assigned to `tests/e2e/step-1-7-e2e.test.ts` + `tests/runtime/trading/multi-exchange-runtime.test.ts`, implementation baseline changed from hardcoded SHA to dynamic instruction, all numeric contradictions resolved, stale `~` `≈` `optional` references purged
+| 4 | 2026-07-19 | Stage 3B4C4-AUDIT-R3: fresh `rg` call-site scan (8 test-involved files confirmed), file existence check (3 non-existent files removed, 1 file added: `tests/data/market-identity.test.ts`), assertExchangeId test contract planned (≥7 new tests), touched-suite baseline (237 tests / 236 pass / 1 pre-existing fail in `tests/e2e/step-1-7-e2e.test.ts`), corrected core targeted baseline (historical: 451 — later corrected to 456 / 0 fail), full npm test noted as incomplete (timeout on pre-existing trade-safety + api-gateway suites), SlowPipeline count corrected 17→24 (historical: 24 later corrected to 15 in §11A fresh run), ReportStore test landing point assigned to `tests/e2e/step-1-7-e2e.test.ts` + `tests/runtime/trading/multi-exchange-runtime.test.ts`, implementation baseline changed from hardcoded SHA to dynamic instruction, all numeric contradictions resolved, stale `~` `≈` `optional` references purged
