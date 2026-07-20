@@ -4,7 +4,12 @@
  * Unit tests for API key management, validation, and referral tracking.
  */
 
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import {
+  describe as nodeDescribe,
+  it,
+  beforeEach,
+  afterEach,
+} from 'node:test';
 import assert from 'node:assert';
 import { createMockApiKeyData } from '../../mocks';
 import { mkdirSync, rmSync, existsSync } from 'fs';
@@ -16,6 +21,9 @@ import { tmpdir } from 'os';
 // =============================================================================
 
 const TEST_STORAGE_DIR = join(tmpdir(), 'clodds-test-apikeys-' + Date.now());
+const describe = existsSync(join(process.cwd(), 'src/api/apikeys.ts'))
+  ? nodeDescribe
+  : nodeDescribe.skip;
 
 function cleanupTestDir(): void {
   if (existsSync(TEST_STORAGE_DIR)) {

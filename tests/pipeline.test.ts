@@ -8,7 +8,8 @@
 
 import { PythonBridgeDaemon } from '../src/router/PythonBridgeDaemon';
 
-const SERIES_COUNT = 20;
+// ChandelierExit(length=22) requires length + 2 candles for warm-up.
+const SERIES_COUNT = 30;
 const CONCURRENCY = 5;
 
 function makeMockSeries(count: number): Array<{ open: number; high: number; low: number; close: number; volume: number }> {

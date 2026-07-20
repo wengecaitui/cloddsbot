@@ -120,7 +120,7 @@ function resolvePythonInterpreter(opts: {
  * 其它 → 'generic'
  */
 function inferRole(scriptPath: string): 'quant-engine' | 'tradingagents' | 'generic' {
-    const normalized = scriptPath.replace(/\\\\/g, '/');
+    const normalized = scriptPath.replace(/\\/g, '/');
     if (normalized.includes('quant_engine/daemon.py')) return 'quant-engine';
     if (normalized.includes('tradingagents_adapter.py')) return 'tradingagents';
     return 'generic';
@@ -315,7 +315,7 @@ export class PythonBridgeDaemon {
             });
 
             // Stage 3B4C5-PRE1: 用 startupTimeoutMs 发起 PING
-            this.sendPayload('PING', {}, this.startupTimeoutMs)
+            this.ping()
                 .then(() => resolve())
                 .catch((err) => {
                     // 启动超时/失败时确保进程清理
