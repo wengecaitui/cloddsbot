@@ -71,10 +71,31 @@ test('dashboard serves loopback UI, state and security headers', async () => {
     assert.equal(state.activity.currentTask?.taskId, 'task-1');
     assert.equal(state.recommendations[0]?.recommendationId, recommendation.recommendationId);
 
+    const collaboration = await fetch(`${url}/api/collaboration-context`).then(response => response.json()) as {
+      kind: string;
+      channel: string;
+      capabilities: { canExecuteCommands: boolean; canSendMessages: boolean };
+      safetyBoundary: { dashboardDoesNotGrantApproval: boolean; productionChangesRequireSeparateAuthorization: boolean };
+      recentEvents: ObservableAgentEvent[];
+      recentAlerts: ObservableAlert[];
+      recommendations: RemediationRecommendation[];
+    };
+    assert.equal(collaboration.kind, 'dsbot.collaboration.context');
+    assert.equal(collaboration.channel, 'dashboard-loopback-read-only');
+    assert.equal(collaboration.capabilities.canExecuteCommands, false);
+    assert.equal(collaboration.capabilities.canSendMessages, false);
+    assert.equal(collaboration.safetyBoundary.dashboardDoesNotGrantApproval, true);
+    assert.equal(collaboration.safetyBoundary.productionChangesRequireSeparateAuthorization, true);
+    assert.equal(collaboration.recentEvents[0]?.eventId, event.eventId);
+    assert.equal(collaboration.recentAlerts[0]?.alertId, alert.alertId);
+    assert.equal(collaboration.recommendations[0]?.recommendationId, recommendation.recommendationId);
+
     const health = await fetch(`${url}/api/health`).then(response => response.json()) as { ok: boolean };
     assert.equal(health.ok, true);
     const denied = await fetch(`${url}/api/health`, { method: 'POST' });
     assert.equal(denied.status, 405);
+    const collaborationDenied = await fetch(`${url}/api/collaboration-context`, { method: 'POST' });
+    assert.equal(collaborationDenied.status, 405);
   } finally {
     await dashboard.stop();
   }
@@ -101,6 +122,13 @@ test('dashboard visible controls are wired to observable interactions', () => {
   assert.match(DASHBOARD_JS, /function initAmbient/);
   assert.match(DASHBOARD_JS, /requestAnimationFrame\(draw\)/);
   assert.match(DASHBOARD_JS, /prefers-reduced-motion/);
+  assert.match(DASHBOARD_HTML, /id="collaborationObjective"/);
+  assert.match(DASHBOARD_HTML, /id="addToCollaborationButton"/);
+  assert.match(DASHBOARD_HTML, /本协同包不构成审批|不会直接发消息或执行命令/);
+  assert.match(DASHBOARD_JS, /function buildCollaborationBundle/);
+  assert.match(DASHBOARD_JS, /thisBundleGrantsApproval:false/);
+  assert.match(DASHBOARD_JS, /fetch\('\/api\/collaboration-context'\)/);
+  assert.match(DASHBOARD_JS, /new Blob/);
 });
 
 test('dashboard ring buffer remains bounded', async () => {

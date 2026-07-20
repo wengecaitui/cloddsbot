@@ -6,6 +6,7 @@ import type { ObservableAlert } from '../alert-engine';
 import type { TaskActivitySnapshot } from '../task-activity-projector';
 import type { RemediationRecommendation } from '../remediation-advisor';
 import { DASHBOARD_CSS, DASHBOARD_HTML, DASHBOARD_JS } from './page';
+import { createDashboardCollaborationContext } from './collaboration-context';
 
 export interface DashboardServerOptions {
   port?: number;
@@ -75,6 +76,17 @@ export function createObservabilityDashboardServer(options: DashboardServerOptio
           recentAlerts: alerts.slice(-100),
           recommendations: recommendations.slice(-100),
         }));
+      }
+      if (requestUrl.pathname === '/api/collaboration-context') {
+        return send(response, 200, 'application/json; charset=utf-8', JSON.stringify(
+          createDashboardCollaborationContext({
+            monitor: options.stateProvider(),
+            activity: options.activityProvider?.() ?? { recentTasks: [] },
+            recentEvents: events,
+            recentAlerts: alerts,
+            recommendations,
+          }),
+        ));
       }
       if (requestUrl.pathname === '/api/events') {
         response.writeHead(200, {
