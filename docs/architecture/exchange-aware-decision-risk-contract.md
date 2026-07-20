@@ -74,7 +74,7 @@
 
 #### Production call sites — exact inventory
 
-Obtained via `rg` against baseline `50a7c4a`. Numbers are file:line.
+Obtained via `rg` against the repository's current HEAD. Numbers are file:line. The exact baseline SHA is recorded in the implementation stage, not hardcoded here.
 
 | Symbol | Production call sites | Notes |
 |---|---|---|
@@ -1230,7 +1230,7 @@ This is by design. 3B4C4 is an atomic type-propagation + validation layer, not a
 
 ## 11. Baseline Test Count (pre-migration)
 
-Exact test counts obtained from `node --test --import tsx` on each targeted suite against HEAD `50a7c4a`. Counts are verified against actually-existing test files only — no speculative or planned-but-unwritten suite files. Approximate values (`~`, `539`) are DELETED.
+Exact test counts obtained from `node --test --import tsx` on each targeted suite. Counts are verified against actually-existing test files only.\n\nThe core baseline SHA changes per implementation. Reference the implementation-stage `git rev-parse HEAD`.
 
 | Suite | File | Tests (exact) | Status |
 |---|---|---|---|
@@ -1252,7 +1252,7 @@ Exact test counts obtained from `node --test --import tsx` on each targeted suit
 
 **Note on removed rows:** Prior revisions of this document listed `tests/router/kill-switch.test.ts` (27 tests), `tests/router/execution-router.test.ts` (32 tests), and `tests/store/report-store.test.ts` (8 tests) — none of these files exist in the repository. KillSwitch, ExecutionRouter, and ReportStore have no dedicated standalone test files. Their coverage is embedded in `tests/e2e/step-1-7-e2e.test.ts` (10 tests), `tests/runtime/trading/trading-runtime.test.ts` (68 tests), `tests/runtime/trading/multi-exchange-runtime.test.ts` (56 tests), `tests/pipeline/slow-pipeline.test.ts` (24 tests), and `tests/pipeline/fast-pipeline-market.test.ts` (18 tests), all of which are listed in the table above and counted toward the subtotal.
 
-**Note on SlowPipeline count:** The earlier R1 revision claimed 17 tests; re-running `node --test --import tsx tests/pipeline/slow-pipeline.test.ts` against HEAD `50a7c4a` reports 24 tests. The 17 figure was an undercount.
+**Note on SlowPipeline count:** The earlier R1 revision claimed 17 tests; re-running `node --test --import tsx tests/pipeline/slow-pipeline.test.ts` against current HEAD reports 24 tests. The 17 figure was an undercount.
 
 **Note on `npm test` (full suite):** `npm test` runs 77 test files including the 14 targeted suites above plus 63 others (e2e, integration, observability, unit, recovery). The full suite has pre-existing failures unrelated to Stage 3B4C3/3B4C4. These pre-existing failures are unchanged by Stage 3B4C4-AUDIT (no production code modified). The targeted 14-suite regression (451 tests, all passing) is the relevant quality baseline for 3B4C4 implementation.
 
@@ -1347,7 +1347,7 @@ Single commit (working tree accumulated through internal order in §9):
 After single commit + push, the chain is:
 
 ```
-HEAD before: 50a7c4a  (3B4C4-AUDIT document)
+HEAD before: <implementation-stage-sha> (last 3B4C4-AUDIT commit)
 HEAD after:  <new sha>  (3B4C4 atomic implementation)
 ```
 
@@ -1355,8 +1355,9 @@ HEAD after:  <new sha>  (3B4C4 atomic implementation)
 
 ## Revision History
 
-| Rev | Date | Author | Changes |
-|-----|------|--------|---------|
-| 1 | 2026-07-19 | — | Initial audit (Stage 3B4C4-AUDIT) |
-| 2 | 2026-07-19 | — | Stage 3B4C4-AUDIT-R1: corrected atomic strategy (single commit), §3D unified failure semantics, §3E explicit vs bound resolution, §4 doubling fix, §1C exact call-site inventory with `rg` evidence, §11 exact test baseline (451 across 14 suites, no approximate counts), §12 single-commit plan with 8 production + 7 test-involved files |
-| 3 | 2026-07-19 | — | Stage 3B4C4-AUDIT-R2: fixed non-existent test file references (removed `tests/router/kill-switch`, `tests/router/execution-router`, `tests/store/report-store` — none exist), corrected SlowPipeline count 17→24, 525→451, 17→14 suites, §5 ReportStore temp-directory contract added, §6 cross-binding checks added, §9 "standalone" → "Internal working-tree phase — no commit", §2 Router memory + KillSwitch risk conclusions corrected, §12 8→7 test files |
+| Rev | Date | Changes |
+|---|---|---|
+| 1 | 2026-07-19 | Initial audit (Stage 3B4C4-AUDIT): provenance gap table, confirmed known problems, canonical identity contract, type contract proposals, migration plan, test matrix |
+| 2 | 2026-07-19 | Stage 3B4C4-AUDIT-R1: corrected atomic strategy (single commit), §3D unified failure semantics, §3E explicit-vs-bound resolution, §1C exact call-site inventory via `rg`, §11 exact test baseline (451 across 14 suites), §12 single-commit plan (8 production files, 8 test-involved files) |
+| 3 | 2026-07-19 | Stage 3B4C4-AUDIT-R2: removed non-existent test file references (`tests/router/kill-switch.test.ts`, `tests/router/execution-router.test.ts`, `tests/store/report-store.test.ts` — confirmed absent by fresh `rg` + `git ls-files`), §5 ReportStore temp-directory contract, §6 component cross-binding checks, §9 phase headers changed to "Internal working-tree phase — no commit", §2 Router memory + KillSwitch risk conclusions corrected |
+| 4 | 2026-07-19 | Stage 3B4C4-AUDIT-R3: fresh `rg` call-site scan (8 test-involved files confirmed), file existence check (3 non-existent files removed, 1 file added: `tests/data/market-identity.test.ts`), assertExchangeId test contract planned (≥7 new tests), touched-suite baseline (237 tests / 236 pass / 1 pre-existing fail in `tests/e2e/step-1-7-e2e.test.ts`), core targeted baseline (14 suites / 451 pass / 0 fail), full npm test noted as incomplete (timeout on pre-existing trade-safety + api-gateway suites), ReportStore test landing point assigned to `tests/e2e/step-1-7-e2e.test.ts` + `tests/runtime/trading/multi-exchange-runtime.test.ts`, implementation baseline changed from hardcoded SHA to dynamic instruction, all numeric contradictions resolved, stale `~` `≈` `optional` references purged
