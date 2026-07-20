@@ -39,11 +39,23 @@ interface PendingRequest {
 export type PythonBridgeOptions = string | {
     scriptPath: string;
     pythonExecutable?: string;
+    /** Python process cold-start handshake budget; does not affect calculate(). */
+    startupTimeoutMs?: number;
     /** 该 daemon 的角色，决定是否净化继承环境。默认按 scriptPath 推断。 */
     role?: 'quant-engine' | 'tradingagents' | 'generic';
     /** 额外显式注入的子进程环境变量（在净化之后合并，可覆盖）。 */
     env?: Record<string, string>;
 };
+
+export const PYTHON_BRIDGE_STARTUP_TIMEOUT_MS = 15_000;
+
+function resolveStartupTimeoutMs(value?: number): number {
+    const timeoutMs = value ?? PYTHON_BRIDGE_STARTUP_TIMEOUT_MS;
+    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
+        throw new Error('PythonBridgeDaemon: startupTimeoutMs must be a positive integer');
+    }
+    return timeoutMs;
+}
 
 const ENV_VARS = [
     'QUANT_ENGINE_PYTHON',
@@ -208,6 +220,7 @@ export class PythonBridgeDaemon {
     private rl: readline.Interface | null = null;
     private scriptPath: string;
     private pythonExecutable: string;
+    private startupTimeoutMs: number;
     private role: 'quant-engine' | 'tradingagents' | 'generic';
     private extraEnv: Record<string, string> | undefined;
     private stderrTail = new StderrTail();
@@ -220,10 +233,12 @@ export class PythonBridgeDaemon {
             this.scriptPath = scriptPathOrOptions;
             this.role = inferRole(scriptPathOrOptions);
             this.extraEnv = undefined;
+            this.startupTimeoutMs = PYTHON_BRIDGE_STARTUP_TIMEOUT_MS;
         } else {
             this.scriptPath = scriptPathOrOptions.scriptPath;
             this.role = scriptPathOrOptions.role ?? inferRole(this.scriptPath);
             this.extraEnv = scriptPathOrOptions.env;
+            this.startupTimeoutMs = resolveStartupTimeoutMs(scriptPathOrOptions.startupTimeoutMs);
         }
         this.pythonExecutable = resolvePythonInterpreter({
             pythonExecutable: typeof scriptPathOrOptions === 'object' ? scriptPathOrOptions.pythonExecutable : undefined,
@@ -281,7 +296,7 @@ export class PythonBridgeDaemon {
             this.stderrTail.clear();
 
             // 握手验证
-            this.ping()
+            this.ping(this.startupTimeoutMs)
                 .then(() => resolve())
                 .catch(reject);
         });
@@ -317,7 +332,7 @@ export class PythonBridgeDaemon {
     /**
      * 发送 PING 握手请求
      */
-    private async ping(timeoutMs: number = 1000): Promise<void> {
+    private async ping(timeoutMs: number): Promise<void> {
         return this.sendPayload('PING', {}, timeoutMs);
     }
 
