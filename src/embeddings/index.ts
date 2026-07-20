@@ -51,7 +51,7 @@ export async function getTransformersPipeline(): Promise<Pipeline> {
 
   pipelinePromise = (async () => {
     try {
-      const { pipeline, env } = await import('@xenova/transformers');
+      const { pipeline, env } = await import('@huggingface/transformers');
 
       env.cacheDir = './.transformers-cache';
       env.allowLocalModels = true;
@@ -61,7 +61,7 @@ export async function getTransformersPipeline(): Promise<Pipeline> {
       // 30s timeout — if model download/init hangs, fail fast
       const timeoutMs = 30_000;
       const pipe = await Promise.race([
-        pipeline('feature-extraction', LOCAL_MODEL, { quantized: true }),
+        pipeline('feature-extraction', LOCAL_MODEL, { dtype: 'q8' }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error(`Embedding model load timed out after ${timeoutMs}ms`)), timeoutMs)
         ),

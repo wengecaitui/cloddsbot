@@ -255,10 +255,15 @@ export function createMockDb(): LedgerDb & {
         );
       }
 
-      // Handle ORDER BY and LIMIT
-      const limitMatch = sql.match(/LIMIT (\d+)/i);
-      if (limitMatch) {
-        const limit = parseInt(limitMatch[1], 10);
+      // Handle ORDER BY and both literal and parameterized pagination.
+      const literalLimit = sql.match(/LIMIT (\d+)/i);
+      const parameterizedPagination = /LIMIT\s+\?\s+OFFSET\s+\?/i.test(sql);
+      if (parameterizedPagination && params.length >= 2) {
+        const limit = Number(params.at(-2));
+        const offset = Number(params.at(-1));
+        result = result.slice(offset, offset + limit);
+      } else if (literalLimit) {
+        const limit = parseInt(literalLimit[1], 10);
         result = result.slice(0, limit);
       }
 

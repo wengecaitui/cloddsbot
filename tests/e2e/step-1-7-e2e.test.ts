@@ -18,11 +18,18 @@ import assert from 'node:assert/strict';
 import { PythonBridgeDaemon } from '../../src/router/PythonBridgeDaemon';
 import { IndicatorService } from '../../src/pipeline/IndicatorService';
 import { FastPipeline } from '../../src/pipeline/FastPipeline';
-import type { FastPipelineConfig, FastPipelineResult } from '../../src/pipeline/FastPipeline';
+import type {
+  FastPipelineConfig,
+  FastPipelineMarketData,
+  FastPipelineResult,
+} from '../../src/pipeline/FastPipeline';
 import { ExecutionRouter } from '../../src/router/ExecutionRouter';
 import type { RouterConfig } from '../../src/router/ExecutionRouter';
 import { KillSwitch } from '../../src/router/KillSwitch';
 import type { MarketBiasReportFull } from '../../src/types/market-bias';
+import { createMarketSnapshotStore } from '../../src/data/MarketSnapshotStore';
+import { createCandleSeriesStore } from '../../src/data/CandleSeriesStore';
+import type { WsKline, WsTicker } from '../../src/data/types';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -78,6 +85,54 @@ function makeBiasReport(now: number, symbol: string): MarketBiasReportFull {
 
 // ── E2E Test ──────────────────────────────────────────────────────
 
+function makeMarketData(symbol: string): FastPipelineMarketData {
+  const snapshotStore = createMarketSnapshotStore({ staleAfterMs: 60_000 });
+  const candleStore = createCandleSeriesStore({ capacityPerSeries: 500 });
+  const now = Date.now();
+  const ticker: WsTicker = {
+    channel: 'ticker',
+    exchange: 'bitget',
+    instId: symbol,
+    last: 67_000,
+    bestBid: 66_990,
+    bestAsk: 67_010,
+    volume24h: 10_000,
+    high24h: 68_000,
+    low24h: 66_000,
+    ts: now,
+  };
+  snapshotStore.updateTicker({ ticker, receivedAt: now });
+
+  for (let index = 0; index < 200; index += 1) {
+    const close = 66_000 + index * 5;
+    const kline: WsKline = {
+      channel: 'kline',
+      exchange: 'bitget',
+      instId: symbol,
+      interval: '1m',
+      open: close - 10,
+      high: close + 20,
+      low: close - 20,
+      close,
+      volume: 100 + index,
+      ts: now - (199 - index) * 60_000,
+      confirm: true,
+    };
+    snapshotStore.updateClosedKline({ kline, receivedAt: now });
+    candleStore.appendClosedKline({ kline, receivedAt: now });
+  }
+
+  return {
+    exchange: 'bitget',
+    snapshotStore,
+    candleStore,
+    interval: '1m',
+    minimumSeries: 100,
+    seriesLimit: 200,
+    maxKlineAgeMs: 120_000,
+  };
+}
+
 describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
   let bridge: PythonBridgeDaemon;
   let indicatorService: IndicatorService;
@@ -87,7 +142,11 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
 
   before(async () => {
     // Start Python daemon
-    bridge = new PythonBridgeDaemon('quant_engine/daemon.py');
+    bridge = new PythonBridgeDaemon({
+      scriptPath: 'quant_engine/daemon.py',
+      role: 'quant-engine',
+      startupTimeoutMs: 10_000,
+    });
     await bridge.init();
 
     // Wire services
@@ -98,6 +157,7 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
       exchange: 'bitget',
       router,
       indicatorService,
+      marketData: makeMarketData(symbol),
     };
 
     fastPipeline = new FastPipeline(config);
@@ -190,7 +250,11 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
 
   it('should fail fast on timeout', async () => {
     // Create a bridge that never responds
-    const hangingBridge = new PythonBridgeDaemon('quant_engine/daemon.py');
+    const hangingBridge = new PythonBridgeDaemon({
+      scriptPath: 'quant_engine/daemon.py',
+      role: 'quant-engine',
+      startupTimeoutMs: 10_000,
+    });
     // Don't call init() — bridge is not connected, so sendPayload will reject immediately
     const hangingService = new IndicatorService(hangingBridge, 100); // 100ms timeout
     const hangingPipeline = new FastPipeline({ exchange: 'bitget', router, indicatorService: hangingService });

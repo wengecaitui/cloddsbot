@@ -96,7 +96,7 @@
     "max_line_length": 1048576
   },
   "timeouts": {
-    "PING": 1000,
+    "PING": 15000,
     "CALC": 2000,
     "default": 5000
   }

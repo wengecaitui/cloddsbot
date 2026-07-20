@@ -4,10 +4,10 @@
  * 验证 PythonBridgeDaemon 分级终止 + 自动重生。
  * 不修改源码，纯黑盒。
  */
-import { PythonBridgeDaemon } from '../src/router/PythonBridgeDaemon';
+import { PythonBridgeDaemon } from '../../src/router/PythonBridgeDaemon';
 import { execSync } from 'child_process';
 
-const ADAPTER = '.verify-sprint-2c/hang.py';
+const ADAPTER = 'tests/recovery/fixtures/hang.py';
 const TIMEOUT_MS = 2000;
 
 function ts() { return new Date().toISOString().substr(11, 12); }
