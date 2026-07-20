@@ -186,12 +186,19 @@ export function createCircuitBreaker(
         reset();
       }
     }, cfg.resetTimeoutMs);
+    // A safety timer must not keep an otherwise finished process alive.
+    autoResetTimer.unref?.();
   }
 
   /**
    * Reset the circuit breaker
    */
   function reset(): void {
+    if (autoResetTimer) {
+      clearTimeout(autoResetTimer);
+      autoResetTimer = null;
+    }
+
     logger.info({ previousReason: tripReason }, 'Circuit breaker RESET');
 
     isTripped = false;

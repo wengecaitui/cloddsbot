@@ -7,10 +7,10 @@
  *   3. ensure no exception thrown
  *   4. ensure PID gone from tasklist
  */
-import { PythonBridgeDaemon } from '../src/router/PythonBridgeDaemon';
+import { PythonBridgeDaemon } from '../../src/router/PythonBridgeDaemon';
 import { execSync } from 'child_process';
 
-const ADAPTER = '.verify-sprint-2c/hang.py';
+const ADAPTER = 'tests/recovery/fixtures/hang.py';
 
 function listPids(): number[] {
     try {
