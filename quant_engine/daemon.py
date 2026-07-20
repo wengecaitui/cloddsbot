@@ -381,6 +381,13 @@ def write_response(payload: Dict):
         pass
 
 
+def _with_authoritative_name(name: str, result: Any) -> Any:
+    """Attach the dispatch key to mapping results without mutating indicator state."""
+    if not isinstance(result, dict):
+        return result
+    return {**result, "name": name}
+
+
 def handle_calc(packet: Dict) -> Dict[str, Any]:
     """处理 CALC 请求，路由到对应指标"""
     asset = packet.get("asset", "UNKNOWN")
@@ -405,9 +412,13 @@ def handle_calc(packet: Dict) -> Dict[str, Any]:
             params["ticks"] = ticks
 
         if name in INDICATOR_DISPATCH:
-            results[name] = INDICATOR_DISPATCH[name](df, params)
+            result = INDICATOR_DISPATCH[name](df, params)
+            results[name] = _with_authoritative_name(name, result)
         else:
-            results[name] = {"error": f"指标 {name} 未实现"}
+            results[name] = _with_authoritative_name(
+                name,
+                {"error": f"指标 {name} 未实现"},
+            )
 
     return results
 
