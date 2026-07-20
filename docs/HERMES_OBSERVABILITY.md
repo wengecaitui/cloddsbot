@@ -96,6 +96,50 @@ Individual adapters can be disabled with `--no-logs`, `--no-runtime`,
 `--no-git`, or `--no-files`. `--all-log-lines` is intentionally opt-in because
 it can produce high-volume and less structured output.
 
+## Windows scheduled-task deployment
+
+The repository includes deployment tooling, but installing a task is an
+explicit production-state change. Build and inspect the proposed task first:
+
+```powershell
+npm.cmd run build
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  scripts/observability/install-hermes-monitor-task.ps1 -WhatIf
+```
+
+The default `AtLogOn` mode runs as the current interactive user, restarts after
+failures, and does not store credentials. It is suitable for an always-logged-in
+workstation. For unattended restart after a reboot, use `-TriggerMode AtStartup`;
+this uses the current user with Task Scheduler's local-only S4U logon and may
+require an elevated shell. S4U does not provide network credentials, which is
+compatible with this monitor's local-only data sources.
+
+Install and start only after production approval:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  scripts/observability/install-hermes-monitor-task.ps1 `
+  -TriggerMode AtStartup -StartNow
+```
+
+Verify the registered task, Gateway, and dashboard:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  scripts/observability/test-hermes-monitor-task.ps1
+```
+
+Rollback stops and unregisters only the scheduled task. Audit ledgers and task
+operation records under `.runtime-observability` are deliberately preserved:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
+  scripts/observability/uninstall-hermes-monitor-task.ps1
+```
+
+Registration, start, and removal actions append structured records to
+`.runtime-observability/operations/task-operations.jsonl`.
+
 ## O3 extension points
 
 O2 adapters implement `ObservableEventSourceAdapter`:
