@@ -142,7 +142,11 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
 
   before(async () => {
     // Start Python daemon
-    bridge = new PythonBridgeDaemon('quant_engine/daemon.py');
+    bridge = new PythonBridgeDaemon({
+      scriptPath: 'quant_engine/daemon.py',
+      role: 'quant-engine',
+      startupTimeoutMs: 10_000,
+    });
     await bridge.init();
 
     // Wire services
@@ -246,7 +250,11 @@ describe('Sprint 1 Step 1.7 — FastPipeline E2E', () => {
 
   it('should fail fast on timeout', async () => {
     // Create a bridge that never responds
-    const hangingBridge = new PythonBridgeDaemon('quant_engine/daemon.py');
+    const hangingBridge = new PythonBridgeDaemon({
+      scriptPath: 'quant_engine/daemon.py',
+      role: 'quant-engine',
+      startupTimeoutMs: 10_000,
+    });
     // Don't call init() — bridge is not connected, so sendPayload will reject immediately
     const hangingService = new IndicatorService(hangingBridge, 100); // 100ms timeout
     const hangingPipeline = new FastPipeline({ exchange: 'bitget', router, indicatorService: hangingService });
