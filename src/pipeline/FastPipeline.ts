@@ -194,17 +194,17 @@ export class FastPipeline extends EventEmitter {
       };
     }
 
-    // Stage 3B4C7: KillSwitch.isLocked check BEFORE market data & indicator work.
-    // If the switch is explicitly locked, stop here — zero I/O on further paths.
+    // Stage 3B4C7-R1: explicit lock check BEFORE market data & indicator work.
+    // Uses getLockState() — a read-only query that does NOT involve positionUsd.
     const killSwitch = this.config.router.killSwitch;
     if (killSwitch) {
-      const lockCheck = killSwitch.check(this.config.exchange, signal.symbol, 1); // 1 = placeholder to trigger lock gate
-      if (!lockCheck.allowed) {
+      const lockState = killSwitch.getLockState(this.config.exchange);
+      if (lockState.locked) {
         return {
           exchange: this.config.exchange,
           decision: 'defense',
           symbol: signal.symbol,
-          reason: lockCheck.reason ?? 'KillSwitch triggered',
+          reason: lockState.reason ?? 'KillSwitch locked',
           elapsedMs: Date.now() - startTime,
           biasReport,
         };
@@ -315,12 +315,8 @@ export class FastPipeline extends EventEmitter {
   /**
    * Decision Engine + position sizing + risk admission chain.
    *
-   * Stage 3B4C7: after DecisionEngine returns 'trade', the fast path now:
-   *   1. Extracts suggestedPositionPct from bias asset
-   *   2. Computes requestedPositionUsd via PositionSizer
-   *   3. Calls KillSwitch.check(exchange, symbol, requestedPositionUsd)
-   *   4. If risk-rejected → returns defense, emits trade_intent_rejected
-   *   5. If risk-allowed → creates TradeIntent, emits trade_intent_created
+   * Stage 3B4C7-R1: unified rejection helper, runtime direction validation,
+   * bias.direction === deResult.direction gate, PositionSizer symbol+direction.
    */
   private decide(
     signal: { exchange: ExchangeId; source: string; symbol: string; signalData?: Record<string, unknown> },
@@ -345,7 +341,7 @@ export class FastPipeline extends EventEmitter {
       elapsedMs: Date.now() - startTime,
     });
 
-    // Stage 3B4C7: if decision is not 'trade', return immediately — no position, no TradeIntent.
+    // Not a trade decision — return immediately, no position, no TradeIntent.
     if (deResult.decision !== 'trade') {
       return {
         exchange: this.config.exchange,
@@ -358,15 +354,61 @@ export class FastPipeline extends EventEmitter {
       };
     }
 
-    // ─── Stage 3B4C7: Trade decision — position sizing + risk check ───
+    // ─── Stage 3B4C7-R1: unified rejection helper ───
+    const emitRejected = (
+      stage: 'direction_validation' | 'bias_validation' | 'position_sizing' | 'risk_admission' | 'intent_creation',
+      reason: string,
+      requestedPositionUsd?: number,
+    ) => {
+      this.emit('trade_intent_rejected', {
+        exchange: this.config.exchange,
+        symbol: signal.symbol,
+        stage,
+        reason,
+        ...(requestedPositionUsd !== undefined ? { requestedPositionUsd } : {}),
+      });
+    };
 
-    // Validate bias asset exists for this symbol
-    if (!bias) {
+    // ─── Direction validation (runtime, not `as` cast) ───
+    if (deResult.direction !== 'long' && deResult.direction !== 'short') {
+      const reason = `[DIR] ${signal.symbol}: DecisionEngine direction not long/short — got ${JSON.stringify(deResult.direction)}`;
+      emitRejected('direction_validation', reason);
       return {
         exchange: this.config.exchange,
         decision: 'defense',
+        direction: 'hold',
         symbol: signal.symbol,
-        reason: `[SIZER] ${signal.symbol}: no bias asset — fail closed`,
+        reason,
+        elapsedMs: Date.now() - startTime,
+        biasReport,
+      };
+    }
+    // DE-verified direction — guaranteed 'long' | 'short' after the gate above.
+    const dir: 'long' | 'short' = deResult.direction;
+
+    // ─── Bias validation ───
+    if (!bias) {
+      const reason = `[BIAS] ${signal.symbol}: no bias asset`;
+      emitRejected('bias_validation', reason);
+      return {
+        exchange: this.config.exchange,
+        decision: 'defense',
+        direction: 'hold',
+        symbol: signal.symbol,
+        reason,
+        elapsedMs: Date.now() - startTime,
+        biasReport,
+      };
+    }
+    if (bias.direction !== dir) {
+      const reason = `[BIAS] ${signal.symbol}: bias.direction (${bias.direction}) !== DecisionEngine direction (${dir})`;
+      emitRejected('bias_validation', reason);
+      return {
+        exchange: this.config.exchange,
+        decision: 'defense',
+        direction: 'hold',
+        symbol: signal.symbol,
+        reason,
         elapsedMs: Date.now() - startTime,
         biasReport,
       };
@@ -375,46 +417,50 @@ export class FastPipeline extends EventEmitter {
     // Validate suggestedPositionPct
     const suggestedPct = bias.suggestedPositionPct;
     if (typeof suggestedPct !== 'number' || !Number.isFinite(suggestedPct) || suggestedPct <= 0 || suggestedPct > 1) {
+      const reason = `[SIZER] ${signal.symbol}: invalid suggestedPositionPct=${suggestedPct}`;
+      emitRejected('position_sizing', reason);
       return {
         exchange: this.config.exchange,
         decision: 'defense',
+        direction: 'hold',
         symbol: signal.symbol,
-        reason: `[SIZER] ${signal.symbol}: invalid suggestedPositionPct=${suggestedPct} — fail closed`,
+        reason,
         elapsedMs: Date.now() - startTime,
         biasReport,
       };
     }
 
+    // ─── Position sizing ───
     let requestedPositionUsd: number;
     try {
       const ksConfig = this.config.router.killSwitch?.getConfig() ?? { totalCapitalUsd: 0 };
       requestedPositionUsd = computePositionUsd({
         totalCapitalUsd: ksConfig.totalCapitalUsd,
         suggestedPositionPct: suggestedPct,
+        symbol: signal.symbol,
+        direction: dir,
       });
     } catch (err) {
+      const reason = `[SIZER] ${signal.symbol}: position sizing error: ${err}`;
+      emitRejected('position_sizing', reason);
       return {
         exchange: this.config.exchange,
         decision: 'defense',
+        direction: 'hold',
         symbol: signal.symbol,
-        reason: `[SIZER] ${signal.symbol}: position sizing error: ${err}`,
+        reason,
         elapsedMs: Date.now() - startTime,
         biasReport,
       };
     }
 
-    // Run KillSwitch risk admission with real USD amount
+    // ─── Risk admission ───
     const killSwitch = this.config.router.killSwitch;
     if (killSwitch) {
       const riskCheck = killSwitch.check(this.config.exchange, signal.symbol, requestedPositionUsd);
       if (!riskCheck.allowed) {
-        const reason = `[RISK] ${riskCheck.reason ?? `KillSwitch rejected ${signal.symbol} at $${requestedPositionUsd.toFixed(0)}`}`;
-        this.emit('trade_intent_rejected', {
-          exchange: this.config.exchange,
-          symbol: signal.symbol,
-          requestedPositionUsd,
-          reason: riskCheck.reason,
-        });
+        const reason = `[RISK] ${riskCheck.reason ?? `${signal.symbol} rejected at $${requestedPositionUsd.toFixed(0)}`}`;
+        emitRejected('risk_admission', riskCheck.reason ?? reason, requestedPositionUsd);
         return {
           exchange: this.config.exchange,
           decision: 'defense',
@@ -427,16 +473,31 @@ export class FastPipeline extends EventEmitter {
       }
     }
 
-    // Risk admitted — create TradeIntent
-    const tradeIntent = createTradeIntent({
-      exchange: this.config.exchange,
-      symbol: signal.symbol,
-      direction: deResult.direction as 'long' | 'short',
-      positionUsd: requestedPositionUsd,
-      source: signal.source,
-      reason: deResult.reason,
-      biasUpdatedAt: biasReport.updatedAt,
-    });
+    // ─── Intent creation ───
+    let tradeIntent: TradeIntent;
+    try {
+      tradeIntent = createTradeIntent({
+        exchange: this.config.exchange,
+        symbol: signal.symbol,
+        direction: dir,
+        positionUsd: requestedPositionUsd,
+        source: signal.source,
+        reason: deResult.reason,
+        biasUpdatedAt: biasReport.updatedAt,
+      });
+    } catch (err) {
+      const reason = `[INTENT] ${signal.symbol}: createTradeIntent error: ${err}`;
+      emitRejected('intent_creation', reason, requestedPositionUsd);
+      return {
+        exchange: this.config.exchange,
+        decision: 'defense',
+        direction: 'hold',
+        symbol: signal.symbol,
+        reason,
+        elapsedMs: Date.now() - startTime,
+        biasReport,
+      };
+    }
 
     this.emit('trade_intent_created', {
       exchange: this.config.exchange,
@@ -447,7 +508,7 @@ export class FastPipeline extends EventEmitter {
     return {
       exchange: this.config.exchange,
       decision: 'trade',
-      direction: deResult.direction,
+      direction: dir,
       symbol: signal.symbol,
       positionUsd: requestedPositionUsd,
       tradeIntent,

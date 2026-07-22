@@ -141,17 +141,25 @@ export class KillSwitch extends EventEmitter {
     // 4. enabled=false only skips numeric risk limits — explicit lock still blocks
     if (!this.config.enabled) return { allowed: true };
 
-    const limit = this.getSinglePositionLimitUsd();
-
     // 5. 单笔百分比上限
-    if (positionUsd > limit) {
+    const pctLimit = this.config.totalCapitalUsd * this.config.maxSinglePositionPct;
+    if (positionUsd > pctLimit) {
       return {
         allowed: false,
-        reason: `KillSwitch: ${symbol} $${positionUsd.toFixed(0)} exceeds single-position limit $${limit.toFixed(0)} (${(this.config.maxSinglePositionPct * 100).toFixed(0)}% of total)` ,
+        reason: `KillSwitch: percentage limit exceeded — ${symbol} $${positionUsd.toFixed(0)} > ${(this.config.maxSinglePositionPct * 100).toFixed(0)}% of total ($${pctLimit.toFixed(0)})`,
       };
     }
 
-    // 6. daily loss cap
+    // 6. 单笔绝对上限（仅当配置为有限值）
+    const absLimit = this.config.maxSinglePositionAbsUsd;
+    if (absLimit != null && Number.isFinite(absLimit) && positionUsd > absLimit) {
+      return {
+        allowed: false,
+        reason: `KillSwitch: absolute limit exceeded — ${symbol} $${positionUsd.toFixed(0)} > $${absLimit.toFixed(0)} absolute cap`,
+      };
+    }
+
+    // 7. daily loss cap
     if (this.config.dailyMaxLossUsd != null && this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
       return {
         allowed: false,
@@ -160,6 +168,17 @@ export class KillSwitch extends EventEmitter {
     }
 
     return { allowed: true };
+  }
+
+  /**
+   * Stage 3B4C7-R1: 只读锁状态查询 — 无资金检查，无 placeholder。
+   * 允许 FastPipeline 在指标 I/O 前提前拦截锁定状态，而不调用数值风险门。
+   */
+  getLockState(exchange: ExchangeId): { locked: boolean; reason?: string } {
+    this.assertBoundExchange(exchange);
+    return this.isLocked
+      ? { locked: true, reason: this.lockReason ?? 'Locked (no reason recorded)' }
+      : { locked: false };
   }
 
   /** 记录亏损 */

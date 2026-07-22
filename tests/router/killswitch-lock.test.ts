@@ -25,7 +25,7 @@ test('2. 1500.01 exceeds 15% limit = rejected', () => {
   const ks = makeKs();
   const result = ks.check('bitget', 'BTCUSDT', 1500.01);
   assert.equal(result.allowed, false);
-  assert.ok(result.reason?.includes('exceeds single-position limit'));
+  assert.ok(result.reason?.includes('percentage limit exceeded'));
 });
 
 // 3. absolute cap 比百分比 cap 更低时生效
