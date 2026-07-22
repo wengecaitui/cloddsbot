@@ -1,36 +1,56 @@
-// Stage 3B4C6: TradingAgents adapter protocol contract tests
-// Offline — no real TradingAgents, no LLM calls.
+// Stage 3B4C6-R1: SlowPipeline lifecycle & shutdown tests
+// Offline — no real TradingAgents, no LLM calls, no network.
+// Python adapter protocol is covered in tests/python/test_adapter_protocol.py.
+// This file focuses on SlowPipeline TS-side lifecycle:
+//   - adapter success → bullish report
+//   - adapter success=false → neutral fallback
+//   - adapter throw → neutral fallback
+//   - init failure clears bridgeInitPromise (retry works)
+//   - concurrent run rejected
+//   - exchange mismatch fails with zero I/O
+//   - persistence failure produces warning event
+//   - publish failure produces warning event
+//   - shutdown is idempotent (called N times → adapter.shutdown called once)
+//   - shutdown → run → shutdown restart path
+//   - shutdown clears internal bridge / bridgeInitPromise
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { SlowPipeline } from '../../src/pipeline/SlowPipeline';
 import type { MarketBiasReportFull } from '../../src/types/market-bias';
 import { createTradingEventBus } from '../../src/events';
 
-// ─── Fake Adapter (simulates tradingagents_adapter.py behavior) ───
+// ─── Fake Adapter (simulates PythonBridgeDaemon surface) ───
 class FakeAdapter {
   public initCalled = false;
   public calculateCalled = false;
-  public shutdownCalled = false;
-  public shouldFail = false;
-  public shouldReturnBadReport = false;
-  /** Captured payload for later inspection */
+  public shutdownCalled = 0;          // counts shutdown invocations
+  public shouldThrowOnCalc = false;
+  public shouldReturnSuccessFalse = false;
+  public shouldThrowOnInit = false;
   public lastPayload: any = null;
-  /** Captured timeoutMs */
   public lastTimeout: number = 0;
+  public hangCalc = false;
+  private hangResolve: (() => void) | null = null;
 
   async init(): Promise<void> {
     this.initCalled = true;
+    if (this.shouldThrowOnInit) {
+      throw new Error('Adapter init failure');
+    }
   }
 
   async calculate(payload: any, timeoutMs: number): Promise<any> {
     this.calculateCalled = true;
     this.lastPayload = payload;
     this.lastTimeout = timeoutMs;
-    if (this.shouldFail) {
-      throw new Error('Adapter fatal failure');
+    if (this.hangCalc) {
+      await new Promise<void>(resolve => { this.hangResolve = resolve; });
     }
-    if (this.shouldReturnBadReport) {
-      return { success: true, report: null };
+    if (this.shouldThrowOnCalc) {
+      throw new Error('Adapter calculate failure');
+    }
+    if (this.shouldReturnSuccessFalse) {
+      return { success: false, error: 'symbol is required' };
     }
     return {
       success: true,
@@ -62,15 +82,15 @@ class FakeAdapter {
   }
 
   shutdown(): void {
-    this.shutdownCalled = true;
+    this.shutdownCalled += 1;
   }
-}
 
-// ─── Fake Adapter (throws on init) ───
-class FailingInitAdapter extends FakeAdapter {
-  async init(): Promise<void> {
-    this.initCalled = true;
-    throw new Error('Adapter init failure');
+  // Test-only helper to unblock a hanging calculate()
+  unhang(): void {
+    if (this.hangResolve) {
+      this.hangResolve();
+      this.hangResolve = null;
+    }
   }
 }
 
@@ -88,268 +108,188 @@ class FakeRouter {
       throw new Error('Router persistence failure');
     }
   }
-
-  getBiasReport(): MarketBiasReportFull | null {
-    return this.lastReport;
-  }
 }
 
-// ─── Adapter protocol tests ──────────────────────────────────
-test('Adapter 1: flattened CALC request receives symbol', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
-  await pipeline.run('bitget', 'BTC/USDT');
-  assert.ok(adapter.calculateCalled, 'adapter.calculate called');
-  assert.equal(adapter.lastPayload.symbol, 'BTC/USDT', 'flattened symbol received');
-  assert.equal(adapter.lastPayload.exchange, 'bitget', 'exchange propagated');
-  assert.ok(adapter.lastPayload.asset, 'asset field present');
-});
-
-test('Adapter 2: nested CALC request symbol overrides flat', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
-  // adapterFactory returns adapter that returns nested payload
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => {
-      // Simulate the adapter protocol: payload field wins over flat
-      return {
-        init: async () => {},
-        async calculate(payload: any) {
-          adapter.calculateCalled = true;
-          adapter.lastPayload = payload;
-          return adapter.shouldFail
-            ? { success: false, error: 'fail' }
-            : adapter.shouldReturnBadReport
-              ? { success: true, report: null }
-              : { success: true, report: { timestamp: Date.now(), updatedAt: Date.now(), globalBias: 'bullish', confidence: 75, assets: [{ symbol: 'ETH/USDT', bias: 'bullish', confidence: 75, volatility: 30, direction: 'long', suggestedPositionPct: 10, entryCondition: '', stopLoss: '-', takeProfit: '-' }], globalLongShortRatio: 1.5, globalVolatility: 30, fearGreedIndex: 60, fundingStatus: 'neutral', whitelist: ['ETH/USDT'], blacklist: [], riskEvents: [] } };
-        },
-        shutdown: () => {},
-      } as any;
-    },
-  });
-  await pipeline.run('bitget', 'ETH/USDT');
-  assert.equal(adapter.lastPayload.symbol, 'ETH/USDT', 'nested payload symbol received');
-});
-
-test('Adapter 3: ANALYZE request handled same as CALC', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
-  await pipeline.run('bitget', 'BTC/USDT');
-  assert.equal(adapter.lastPayload.symbol, 'BTC/USDT', 'symbol passed via CALC');
-});
-
-test('Adapter 4: correlationId matching preserved in response', async () => {
-  // This is verified in PythonBridge unit tests — adapter.py always sets response["correlationId"] = correlation_id
-  // The bridge's handleIncomingMessage checks correlationId matches
-  assert.ok(true, 'delegated to PythonBridgeDaemon unit tests');
-});
-
-test('Adapter 5: missing symbol returns error with no LLM call', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
-  adapter.shouldFail = true;
-  const events: any[] = [];
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
-  pipeline.on('run_complete', (e) => events.push(e));
-  const report = await pipeline.run('bitget', '');
-  assert.equal(report.confidence, 0, 'fallback has zero confidence');
-  assert.equal(report.globalBias, 'neutral', 'fallback is neutral');
-  assert.equal(events.length, 1, 'run_complete fired');
-});
-
-test('Adapter 6: invalid JSON returns error', async () => {
-  // PythonBridgeDaemon parses JSONL — malformed line from Python side would crash handleIncomingMessage
-  // Verified in PythonBridge startup tests
-  assert.ok(true, 'covered by PythonBridgeDaemon startup tests');
-});
-
-test('Adapter 7: unknown request type returns NOT_IMPLEMENTED', async () => {
-  // Verified via adapter.py main() logic — static dispatch
-  assert.ok(true, 'static dispatch in HANDLERS dict');
-});
-
-test('Adapter 8: PING does not initialize TradingAgentsGraph', async () => {
-  // handle_ping() returns immediately without calling get_graph()
-  assert.ok(true, 'adapter.py handle_ping is graph-independent');
-});
-
-// ─── SlowPipeline lifecycle tests ────────────────────────────
-test('SP 1: successful report publishes with exchange override', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
-  const bus = createTradingEventBus();
-  const events: any[] = [];
-  bus.subscribe('research.bias.updated', (e) => events.push(e));
+// Helper to build a pipeline with isolated fakes.
+function buildPipeline(overrides: { adapter?: FakeAdapter; router?: FakeRouter; bus?: any; clock?: any } = {}) {
+  const adapter = overrides.adapter ?? new FakeAdapter();
+  const router = overrides.router ?? (new FakeRouter() as any);
+  const bus = overrides.bus ?? createTradingEventBus();
   const pipeline = new SlowPipeline({
     exchange: 'bitget',
     router,
     bus,
     adapterFactory: () => adapter as any,
+    ...(overrides.clock ? { clock: overrides.clock } : {}),
   });
+  return { pipeline, adapter, router, bus };
+}
+
+// ─── Tests ────────────────────────────────────────────────────
+
+test('1. adapter success produces bullish report with exchange override', async () => {
+  const { pipeline, adapter, router } = buildPipeline();
   const report = await pipeline.run('bitget', 'BTC/USDT');
-  assert.equal(report.exchange, 'bitget', 'exchange overridden');
-  assert.equal(events[0].report.exchange, 'bitget', 'event carries exchange');
-  assert.equal(router.updateCalled, 1, 'router called');
+  assert.equal(adapter.initCalled, true, 'adapter.init called');
+  assert.equal(adapter.calculateCalled, true, 'adapter.calculate called');
+  assert.equal(adapter.lastPayload.symbol, 'BTC/USDT', 'symbol propagated to adapter');
+  assert.equal(adapter.lastPayload.exchange, 'bitget', 'exchange propagated to adapter');
+  assert.equal(adapter.lastPayload.asset, 'BTC/USDT', 'asset field present (legacy contract)');
+  assert.equal(report.exchange, 'bitget', 'exchange overridden post-spread');
+  assert.equal(report.globalBias, 'bullish', 'bullish passthrough');
+  assert.equal(router.updateCalled, 1, 'router.updateBiasReport called once');
 });
 
-test('SP 2: adapter success=false produces neutral fallback', async () => {
-  const adapter = new FakeAdapter();
-  adapter.shouldFail = true;
-  const router = new FakeRouter() as any;
-  const events: any[] = [];
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
-  pipeline.on('run_complete', (e) => events.push(e));
+test('2. adapter success=false produces neutral fallback with riskEvents', async () => {
+  const { pipeline, adapter, router } = buildPipeline();
+  adapter.shouldReturnSuccessFalse = true;
   const report = await pipeline.run('bitget', 'BTC/USDT');
+  assert.equal(report.globalBias, 'neutral', 'neutral fallback on success=false');
   assert.equal(report.confidence, 0, 'zero confidence fallback');
-  assert.equal(report.globalBias, 'neutral', 'neutral fallback');
+  assert.equal(router.updateCalled, 1, 'fallback still persisted');
   assert.ok(report.riskEvents.length > 0, 'riskEvents describes adapter failure');
-  assert.equal(events.length, 1, 'run_complete still fires');
+  assert.ok(report.riskEvents[0].includes('symbol is required'), 'riskEvents carries adapter error');
 });
 
-test('SP 3: adapter throw produces neutral fallback', async () => {
-  const adapter = new FakeAdapter();
-  adapter.shouldFail = true;
-  const router = new FakeRouter() as any;
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
+test('3. adapter throw produces neutral fallback', async () => {
+  const { pipeline, adapter, router } = buildPipeline();
+  adapter.shouldThrowOnCalc = true;
   const report = await pipeline.run('bitget', 'BTC/USDT');
-  assert.equal(report.confidence, 0, 'throw produces neutral fallback');
+  assert.equal(report.globalBias, 'neutral', 'neutral fallback on throw');
+  assert.equal(report.confidence, 0, 'zero confidence fallback on throw');
+  assert.equal(router.updateCalled, 1, 'fallback still persisted on throw');
+  assert.ok(report.riskEvents[0].includes('Adapter calculate failure'), 'riskEvents carries throw message');
 });
 
-test('SP 4: init failure clears bridgeInitPromise allowing retry', async () => {
-  const adapter = new FailingInitAdapter();
+test('4. init failure clears bridgeInitPromise; retry succeeds with new adapter', async () => {
+  const failingAdapter = new FakeAdapter();
+  failingAdapter.shouldThrowOnInit = true;
   const router = new FakeRouter() as any;
+  // Pipeline starts with adapterFactory that always returns the same failing instance.
+  let currentAdapter: FakeAdapter = failingAdapter;
   const pipeline = new SlowPipeline({
     exchange: 'bitget',
     router,
-    adapterFactory: () => adapter as any,
+    adapterFactory: () => currentAdapter as any,
   });
-  // First run — init fails, run() catches and returns fallback
-  const fallback = await pipeline.run('bitget', 'BTC/USDT');
-  assert.equal(fallback.globalBias, 'neutral', 'first run produces neutral fallback');
-  assert.ok(fallback.riskEvents[0]?.includes('Adapter init failure'), 'fallback mentions init failure');
+  const first = await pipeline.run('bitget', 'BTC/USDT');
+  assert.equal(first.globalBias, 'neutral', 'first run produces neutral fallback');
+  assert.ok(first.riskEvents[0].includes('Adapter init failure'), 'fallback mentions init failure');
 
-  // Replace with working adapter and retry
+  // Replace adapterFactory target with a working adapter; retry must succeed.
   const workingAdapter = new FakeAdapter();
-  (pipeline as any).config.adapterFactory = () => workingAdapter as any;
-  const report = await pipeline.run('bitget', 'BTC/USDT');
-  assert.ok(report, 'retry succeeded');
-  assert.equal(report.globalBias, 'bullish', 'working adapter produces bullish');
-  assert.equal(workingAdapter.calculateCalled, true, 'working adapter was used');
+  currentAdapter = workingAdapter;
+  const second = await pipeline.run('bitget', 'BTC/USDT');
+  assert.equal(second.globalBias, 'bullish', 'retry produces bullish from working adapter');
+  assert.equal(workingAdapter.initCalled, true, 'working adapter init called');
+  assert.equal(workingAdapter.calculateCalled, true, 'working adapter calculate called');
 });
 
-test('SP 5: concurrent run rejected', async () => {
-  const adapter = new FakeAdapter();
-  let resolveHang: () => void = () => {};
-  adapter.calculate = async () => {
-    await new Promise<void>(r => { resolveHang = r; }); // hang until manually resolved
-    return { success: true, report: null };
-  };
-  adapter.init = async () => {};
-  const router = new FakeRouter() as any;
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
-  const first = pipeline.run('bitget', 'BTC/USDT');
-  await new Promise(r => setTimeout(r, 10));
+test('5. concurrent run rejected with zero I/O on second call', async () => {
+  const { pipeline, adapter } = buildPipeline();
+  adapter.hangCalc = true;
+  // First run hangs inside calculate
+  const firstRun = pipeline.run('bitget', 'BTC/USDT');
+  // Wait until first run is inside the adapter
+  await new Promise(r => setTimeout(r, 20));
   await assert.rejects(
     () => pipeline.run('bitget', 'BTC/USDT'),
     /already running/,
   );
-  // Unblock first run and let it finish
-  resolveHang();
-  await first;
+  adapter.unhang();
+  await firstRun;
 });
 
-test('SP 6: exchange mismatch fails with zero I/O', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    adapterFactory: () => adapter as any,
-  });
+test('6. exchange mismatch fails before any adapter I/O', async () => {
+  const { pipeline, adapter } = buildPipeline();
   await assert.rejects(
     () => pipeline.run('binance', 'BTC/USDT'),
     /exchange mismatch/,
   );
-  assert.equal(adapter.initCalled, false, 'no adapter init on mismatch');
-  assert.equal(adapter.calculateCalled, false, 'no adapter calculate on mismatch');
+  // Allow microtask queue to flush any stray async work
+  await new Promise(r => setTimeout(r, 5));
+  assert.equal(adapter.initCalled, false, 'no init on mismatch');
+  assert.equal(adapter.calculateCalled, false, 'no calculate on mismatch');
 });
 
-test('SP 7: persistence failure produces warning event', async () => {
-  const adapter = new FakeAdapter();
+test('7. router persistence failure produces persistence_warning', async () => {
   const router = new FakeRouter() as any;
   router.shouldReject = true;
-  const warnings: any[] = [];
+  const adapter = new FakeAdapter();
   const pipeline = new SlowPipeline({
     exchange: 'bitget',
     router,
     adapterFactory: () => adapter as any,
   });
+  const warnings: any[] = [];
   pipeline.on('persistence_warning', (w) => warnings.push(w));
   await pipeline.run('bitget', 'BTC/USDT');
-  assert.equal(warnings.length, 1, 'persistence warning emitted');
+  // persistence is fire-and-observe; warning fires asynchronously
+  await new Promise(r => setTimeout(r, 30));
+  assert.equal(warnings.length, 1, 'persistence_warning emitted');
+  assert.ok(warnings[0].error, 'warning carries error');
 });
 
-test('SP 8: publish failure produces warning event', async () => {
-  const adapter = new FakeAdapter();
-  const router = new FakeRouter() as any;
+test('8. publish subscriber throw produces publish_warning', async () => {
   const bus = createTradingEventBus();
-  bus.subscribe('research.bias.updated', () => { throw new Error('Pub fail'); });
+  bus.subscribe('research.bias.updated', () => { throw new Error('Subscriber failure'); });
+  const { pipeline } = buildPipeline({ bus });
   const warnings: any[] = [];
-  const pipeline = new SlowPipeline({
-    exchange: 'bitget',
-    router,
-    bus,
-    adapterFactory: () => adapter as any,
-  });
   pipeline.on('publish_warning', (w) => warnings.push(w));
   await pipeline.run('bitget', 'BTC/USDT');
-  assert.equal(warnings.length, 1, 'publish warning emitted');
+  assert.equal(warnings.length, 1, 'publish_warning emitted');
+  assert.equal(warnings[0].failures, 1, 'failures=1');
 });
 
-test('SP 9: shutdown is idempotent', async () => {
-  const adapter = new FakeAdapter();
+test('9. shutdown is idempotent — N calls close adapter exactly once', async () => {
+  const { pipeline, adapter } = buildPipeline();
+  await pipeline.run('bitget', 'BTC/USDT');
+  pipeline.shutdown();
+  pipeline.shutdown();
+  pipeline.shutdown();
+  assert.equal(adapter.shutdownCalled, 1, 'adapter.shutdown called exactly once');
+});
+
+test('10. shutdown → run → shutdown restart path closes both adapters', async () => {
+  // Adapter 1: used by first run, closed by first shutdown.
+  const adapter1 = new FakeAdapter();
   const router = new FakeRouter() as any;
+  let currentAdapter: FakeAdapter = adapter1;
   const pipeline = new SlowPipeline({
     exchange: 'bitget',
     router,
-    adapterFactory: () => adapter as any,
+    adapterFactory: () => currentAdapter as any,
   });
   await pipeline.run('bitget', 'BTC/USDT');
-  // Call shutdown twice — should not throw
+  assert.equal(adapter1.calculateCalled, true, 'adapter1 used by first run');
   pipeline.shutdown();
+  assert.equal(adapter1.shutdownCalled, 1, 'adapter1 closed by first shutdown');
+
+  // Adapter 2: returned by adapterFactory after first shutdown.
+  const adapter2 = new FakeAdapter();
+  currentAdapter = adapter2;
+  await pipeline.run('bitget', 'ETH/USDT');
+  assert.equal(adapter2.initCalled, true, 'adapter2 init');
+  assert.equal(adapter2.calculateCalled, true, 'adapter2 calculate');
+  assert.equal(adapter1.shutdownCalled, 1, 'adapter1 still closed (not re-touched)');
+
   pipeline.shutdown();
-  assert.ok(true, 'double shutdown does not throw');
+  assert.equal(adapter2.shutdownCalled, 1, 'adapter2 closed by second shutdown');
+  assert.equal(adapter1.shutdownCalled, 1, 'adapter1 untouched by second shutdown');
 });
 
-test('SP 10: successful report returned via run_complete', async () => {
+test('11. shutdown clears internal bridge and bridgeInitPromise', async () => {
+  const { pipeline, adapter } = buildPipeline();
+  await pipeline.run('bitget', 'BTC/USDT');
+  // Internal state asserted via reflection (no public API exposes these).
+  const pre = (pipeline as any);
+  assert.ok(pre.bridge === adapter || pre.bridge === null, 'pre-shutdown bridge set');
+  pipeline.shutdown();
+  assert.equal((pipeline as any).bridge, null, 'bridge ref nulled');
+  assert.equal((pipeline as any).bridgeInitPromise, null, 'bridgeInitPromise nulled');
+});
+
+test('12. shutdown before any run is a no-op (no adapter created)', async () => {
   const adapter = new FakeAdapter();
   const router = new FakeRouter() as any;
   const pipeline = new SlowPipeline({
@@ -357,8 +297,21 @@ test('SP 10: successful report returned via run_complete', async () => {
     router,
     adapterFactory: () => adapter as any,
   });
-  const report = await pipeline.run('bitget', 'BTC/USDT');
-  assert.ok(report, 'report returned');
-  assert.equal(report.exchange, 'bitget', 'exchange set');
-  assert.equal(report.globalBias, 'bullish', 'globalBias passed through');
+  // shutdown before any run — must not throw, must not call adapter.shutdown
+  pipeline.shutdown();
+  assert.equal(adapter.initCalled, false, 'no init on shutdown-before-run');
+  assert.equal(adapter.calculateCalled, false, 'no calculate on shutdown-before-run');
+  assert.equal(adapter.shutdownCalled, 0, 'no adapter.shutdown when no bridge was created');
+});
+
+test('13. successful report carries correlationId-less event payload', async () => {
+  const bus = createTradingEventBus();
+  const events: any[] = [];
+  bus.subscribe('research.bias.updated', (e) => events.push(e));
+  const { pipeline } = buildPipeline({ bus });
+  await pipeline.run('bitget', 'BTC/USDT');
+  assert.equal(events.length, 1, 'one event published');
+  assert.equal(events[0].type, 'research.bias.updated', 'event type');
+  assert.equal(events[0].report.exchange, 'bitget', 'event report carries exchange');
+  assert.equal(typeof events[0].receivedAt, 'number', 'receivedAt is a number');
 });

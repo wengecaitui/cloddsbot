@@ -246,16 +246,14 @@ export class SlowPipeline extends EventEmitter {
     };
   }
   /**
-   * 关闭适配器进程（幂等）。
-   * Stage 3B4C6: cached shutdownPromise guards double-shutdown race.
+   * 关闭适配器进程（同步、幂等）。
+   * Stage 3B4C6-R1: 先清空内部引用再调用 bridge.shutdown()。
+   * 支持 shutdown → run(新bridge) → shutdown(再关闭) 完整生命周期。
    */
-  private shutdownPromise: Promise<void> | null = null;
   shutdown(): void {
-    if (this.shutdownPromise) return;
-    this.shutdownPromise = Promise.resolve().then(async () => {
-      this.bridge?.shutdown();
-      this.bridge = null;
-      this.bridgeInitPromise = null;
-    });
+    const bridge = this.bridge;
+    this.bridge = null;
+    this.bridgeInitPromise = null;
+    bridge?.shutdown();
   }
 }
