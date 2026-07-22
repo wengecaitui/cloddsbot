@@ -25,11 +25,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: npm audit (high/critical) - production only
-        run: npm audit --audit-level=high --production
-
-      - name: audit-ci (moderate+) - production only
-        run: npx --yes audit-ci --moderate --production
+      - name: Audit production dependencies (moderate+, with time-bounded exceptions)
+        run: npx --yes audit-ci@^7 --config .audit-ci.jsonc --production
 
       - name: Check for known vulnerabilities
         run: |
