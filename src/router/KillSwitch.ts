@@ -9,6 +9,9 @@
  *
  * Stage 3B4C4: exchange-bound. Every KillSwitch is constructed with an ExchangeId
  * and every method validates `exchange === this.exchange` before mutating state.
+ *
+ * Stage 3B4C7: explicit isLocked state checked by check() before numeric limits.
+ * lockReason stores the precise reason for audit.
  */
 
 import { EventEmitter } from 'events';
@@ -54,7 +57,7 @@ export interface RiskSnapshot {
   openPositions: number;
   /** Kill Switch 是否触发 */
   isTriggered: boolean;
-  /** 触发原因（如有） */
+  /** 触发原因（如有） — Stage 3B4C7: returns precise lockReason, not generic text. */
   triggerReason?: string;
 }
 
@@ -64,6 +67,8 @@ export class KillSwitch extends EventEmitter {
   private config: KillSwitchConfig;
   private dailyLossUsd: number = 0;
   private isLocked: boolean = false;
+  /** Stage 3B4C7: precise reason stored when locked. */
+  private lockReason: string | null = null;
 
   constructor(
     exchange: ExchangeId,
@@ -97,35 +102,83 @@ export class KillSwitch extends EventEmitter {
     return Math.min(pctLimit, this.config.maxSinglePositionAbsUsd ?? Infinity);
   }
 
-  /** 检查是否允许下单 */
+  /**
+   * 检查是否允许下单。
+   *
+   * Stage 3B4C7 order:
+   *   1. exchange validation
+   *   2. explicit isLocked check (absolute gate — even with enabled=false)
+   *   3. positionUsd validity (non-finite, <=0, or NaN → reject)
+   *   4. enabled check (disabled → skip numeric limits only)
+   *   5. single-position pct cap
+   *   6. single-position absolute cap
+   *   7. daily loss cap
+   */
   check(
     exchange: ExchangeId,
     symbol: string,
     positionUsd: number,
   ): { allowed: boolean; reason?: string } {
+    // 1. Exchange validation
     this.assertBoundExchange(exchange);
 
-    if (!this.config.enabled) return { allowed: true };
-
-    const limit = this.getSinglePositionLimitUsd();
-
-    // 单笔上限
-    if (positionUsd > limit) {
+    // 2. Stage 3B4C7: explicit lock is an absolute gate
+    if (this.isLocked) {
       return {
         allowed: false,
-        reason: `KillSwitch: ${symbol} $${positionUsd.toFixed(0)} 超过单笔上限 $${limit.toFixed(0)} (${(this.config.maxSinglePositionPct * 100).toFixed(0)}% 总仓位)`,
+        reason: `KillSwitch: locked — ${this.lockReason ?? 'Unknown reason'}`,
       };
     }
 
-    // 日亏损上限（⚠️ 暂未启用，dailyMaxLossUsd = undefined 时跳过）
+    // 3. Stage 3B4C7: invalid positionUsd
+    if (typeof positionUsd !== 'number' || !Number.isFinite(positionUsd) || positionUsd <= 0) {
+      return {
+        allowed: false,
+        reason: `KillSwitch: positionUsd must be a finite positive number, got ${positionUsd}`,
+      };
+    }
+
+    // 4. enabled=false only skips numeric risk limits — explicit lock still blocks
+    if (!this.config.enabled) return { allowed: true };
+
+    // 5. 单笔百分比上限
+    const pctLimit = this.config.totalCapitalUsd * this.config.maxSinglePositionPct;
+    if (positionUsd > pctLimit) {
+      return {
+        allowed: false,
+        reason: `KillSwitch: percentage limit exceeded — ${symbol} $${positionUsd.toFixed(0)} > ${(this.config.maxSinglePositionPct * 100).toFixed(0)}% of total ($${pctLimit.toFixed(0)})`,
+      };
+    }
+
+    // 6. 单笔绝对上限（仅当配置为有限值）
+    const absLimit = this.config.maxSinglePositionAbsUsd;
+    if (absLimit != null && Number.isFinite(absLimit) && positionUsd > absLimit) {
+      return {
+        allowed: false,
+        reason: `KillSwitch: absolute limit exceeded — ${symbol} $${positionUsd.toFixed(0)} > $${absLimit.toFixed(0)} absolute cap`,
+      };
+    }
+
+    // 7. daily loss cap
     if (this.config.dailyMaxLossUsd != null && this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
       return {
         allowed: false,
-        reason: `KillSwitch: 今日亏损 $${this.dailyLossUsd.toFixed(0)} 已达上限 $${this.config.dailyMaxLossUsd.toFixed(0)}`,
+        reason: `KillSwitch: daily loss $${this.dailyLossUsd.toFixed(0)} reached limit $${this.config.dailyMaxLossUsd.toFixed(0)}`,
       };
     }
 
     return { allowed: true };
+  }
+
+  /**
+   * Stage 3B4C7-R1: 只读锁状态查询 — 无资金检查，无 placeholder。
+   * 允许 FastPipeline 在指标 I/O 前提前拦截锁定状态，而不调用数值风险门。
+   */
+  getLockState(exchange: ExchangeId): { locked: boolean; reason?: string } {
+    this.assertBoundExchange(exchange);
+    return this.isLocked
+      ? { locked: true, reason: this.lockReason ?? 'Locked (no reason recorded)' }
+      : { locked: false };
   }
 
   /** 记录亏损 */
@@ -133,8 +186,10 @@ export class KillSwitch extends EventEmitter {
     this.assertBoundExchange(exchange);
     this.dailyLossUsd += usd;
     if (this.config.dailyMaxLossUsd != null && this.dailyLossUsd >= this.config.dailyMaxLossUsd) {
+      const reason = `Daily loss $${this.dailyLossUsd.toFixed(0)} >= $${this.config.dailyMaxLossUsd.toFixed(0)}`;
       this.isLocked = true;
-      this.emit('lock', { reason: `Daily loss $${this.dailyLossUsd.toFixed(0)} >= $${this.config.dailyMaxLossUsd.toFixed(0)}` });
+      this.lockReason = reason;
+      this.emit('lock', { exchange, reason });
     }
   }
 
@@ -142,13 +197,15 @@ export class KillSwitch extends EventEmitter {
   lock(exchange: ExchangeId, reason: string): void {
     this.assertBoundExchange(exchange);
     this.isLocked = true;
-    this.emit('lock', { reason });
+    this.lockReason = reason;
+    this.emit('lock', { exchange, reason });
   }
 
   /** 解锁（新交易日） */
   unlock(exchange: ExchangeId): void {
     this.assertBoundExchange(exchange);
     this.isLocked = false;
+    this.lockReason = null;
     this.dailyLossUsd = 0;
     this.emit('unlock');
   }
@@ -158,12 +215,13 @@ export class KillSwitch extends EventEmitter {
     this.assertBoundExchange(exchange);
     return {
       exchange: this.exchange,
-      currentExposureUsd: 0,  // TODO: 从账户状态读取
+      currentExposureUsd: 0,  // TODO: wire from account state
       todayRealizedLossUsd: this.dailyLossUsd,
       todayUnrealizedLossUsd: 0,
       openPositions: 0,
       isTriggered: Boolean(this.isLocked),
-      triggerReason: this.isLocked ? 'Daily loss limit reached' : undefined,
+      // Stage 3B4C7: return precise lockReason when triggered
+      triggerReason: this.isLocked ? (this.lockReason ?? 'Locked (no reason recorded)') : undefined,
     };
   }
 
