@@ -1,6 +1,7 @@
-// Stage 3B4C8: Paper Account types — config, position, snapshot, ledger entries.
+// Stage 3B4C8-R1: Paper Account types — with runtime ExchangeId validation.
 
 import type { ExchangeId } from '../data/MarketIdentity';
+import { isExchangeId } from '../data/MarketIdentity';
 import type { PaperFill } from './paper-fill';
 
 // ─── Config ────────────────────────────────────────────────────
@@ -15,6 +16,9 @@ export interface PaperAccountConfig {
 export function validatePaperAccountConfig(c: PaperAccountConfig): PaperAccountConfig {
   if (!c.accountId || typeof c.accountId !== 'string' || !ACCOUNT_ID_RE.test(c.accountId)) {
     throw new Error(`PaperAccountConfig: accountId must match ${ACCOUNT_ID_RE}, got ${JSON.stringify(c.accountId)}`);
+  }
+  if (!isExchangeId(c.exchange)) {
+    throw new Error(`PaperAccountConfig: invalid ExchangeId ${JSON.stringify(c.exchange)}`);
   }
   if (typeof c.initialCashUsd !== 'number' || !Number.isFinite(c.initialCashUsd) || c.initialCashUsd <= 0) {
     throw new Error(`PaperAccountConfig: initialCashUsd must be a finite positive number, got ${c.initialCashUsd}`);

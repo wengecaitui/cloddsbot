@@ -1,25 +1,16 @@
-// Stage 3B4C8: Deterministic Paper Account Ledger
-//
-// Synchronous, no async, no I/O, no network, no LLM, no randomness.
-// Same config + same event sequence = exactly identical state.
-// All error classes from './errors'.
-// Mutations follow: validate → clone → compute → verify → commit.
-
+// Stage 3B4C8-R1: Deterministic Paper Account Ledger — deep clone, immutable, atomic replay.
 import type { ExchangeId } from '../data/MarketIdentity';
+import { isExchangeId } from '../data/MarketIdentity';
 import type { PaperFill } from '../types/paper-fill';
 import { validatePaperFill } from '../types/paper-fill';
 import type {
-  PaperAccountConfig,
-  PaperPosition,
-  PaperAccountSnapshot,
-  PaperLedgerEntry,
-  PaperFillLedgerEntry,
-  PaperMarkLedgerEntry,
+  PaperAccountConfig, PaperPosition, PaperAccountSnapshot,
+  PaperLedgerEntry, PaperFillLedgerEntry, PaperMarkLedgerEntry,
 } from '../types/paper-account';
 import { validatePaperAccountConfig } from '../types/paper-account';
 import {
-  roundUsd, roundQuantity, normalizeZero, assertFinitePositive, assertFiniteNonNegative,
-  assertAccountingInvariant, ACCOUNTING_EPSILON,
+  roundUsd, roundQuantity, normalizeZero, assertFinitePositive,
+  assertAccountingInvariant, ACCOUNTING_EPSILON, QUANTITY_EPSILON,
 } from './PaperLedgerMath';
 import {
   DuplicateFillConflictError, StalePaperLedgerEventError, ConflictingMarkError,
@@ -27,62 +18,107 @@ import {
   PaperLedgerCorruptionError,
 } from './errors';
 
-// ─── Internal state (never exposed mutably) ────────────────────
+// ═══ Deep clone helpers (R1) ═══════════════════════════════════════
+function cloneConfig(c: PaperAccountConfig): PaperAccountConfig {
+  return { accountId: c.accountId, exchange: c.exchange, initialCashUsd: c.initialCashUsd };
+}
+
+function clonePosition(p: PaperPosition): PaperPosition {
+  return { ...p };
+}
+
+function cloneFill(f: PaperFill): PaperFill {
+  return {
+    fillId: f.fillId, exchange: f.exchange, symbol: f.symbol,
+    side: f.side, quantity: f.quantity, priceUsd: f.priceUsd, feeUsd: f.feeUsd, executedAt: f.executedAt,
+  };
+}
+
+function cloneEntry(e: PaperLedgerEntry): PaperLedgerEntry {
+  if (e.type === 'fill') return { type: 'fill', sequence: e.sequence, fill: cloneFill(e.fill) };
+  return { type: 'mark', sequence: e.sequence, exchange: e.exchange, symbol: e.symbol, markPriceUsd: e.markPriceUsd, markedAt: e.markedAt };
+}
+
+// ─── Internal state ──────────────────────────────────────────────
 interface LedgerState {
   config: PaperAccountConfig;
   cashUsd: number;
   realizedPnlUsd: number;
   unrealizedPnlUsd: number;
   totalFeesUsd: number;
-  positions: Map<string, PaperPosition>;  // symbol → position
+  positions: Map<string, PaperPosition>;
   entries: PaperLedgerEntry[];
-  processedFillIds: Map<string, PaperFill>; // fillId → canonical normalized fill
+  processedFillIds: Map<string, PaperFill>;
   sequence: number;
   updatedAt: number;
-  lastEventAt: Map<string, number>; // symbol → most recent event time
+  lastEventAt: Map<string, number>;
 }
 
 function cloneState(s: LedgerState): LedgerState {
+  const positions = new Map<string, PaperPosition>();
+  for (const [k, v] of s.positions) positions.set(k, clonePosition(v));
+  const processedFillIds = new Map<string, PaperFill>();
+  for (const [k, v] of s.processedFillIds) processedFillIds.set(k, cloneFill(v));
   return {
-    ...s,
-    positions: new Map(s.positions),
-    entries: [...s.entries],
-    processedFillIds: new Map(s.processedFillIds),
-    lastEventAt: new Map(s.lastEventAt),
-  };
-}
-
-// ─── Helpers ───────────────────────────────────────────────────
-function buildSnapshot(s: LedgerState): PaperAccountSnapshot {
-  const positions = Array.from(s.positions.values()).map(p => ({ ...p }));
-  const grossExposureUsd = positions.reduce((sum, p) => sum + Math.abs(p.marketValueUsd), 0);
-  const netExposureUsd = positions.reduce((sum, p) => sum + p.marketValueUsd, 0);
-  const equityUsd = roundUsd(s.cashUsd + netExposureUsd);
-  return {
-    accountId: s.config.accountId,
-    exchange: s.config.exchange,
-    initialCashUsd: s.config.initialCashUsd,
+    config: cloneConfig(s.config),
     cashUsd: s.cashUsd,
     realizedPnlUsd: s.realizedPnlUsd,
     unrealizedPnlUsd: s.unrealizedPnlUsd,
     totalFeesUsd: s.totalFeesUsd,
-    equityUsd,
-    grossExposureUsd: roundUsd(grossExposureUsd),
-    netExposureUsd: roundUsd(netExposureUsd),
-    openPositions: s.positions.size,
-    processedFills: s.processedFillIds.size,
+    positions,
+    entries: s.entries.map(cloneEntry),
+    processedFillIds,
     sequence: s.sequence,
     updatedAt: s.updatedAt,
-    positions,
+    lastEventAt: new Map(s.lastEventAt),
+  };
+}
+
+function canonicalizeFill(f: PaperFill): PaperFill {
+  const validated = validatePaperFill(f);
+  const qty = roundQuantity(validated.quantity);
+  if (qty <= 0) throw new Error('PaperFill: quantity must be a finite positive number after canonicalization');
+  return {
+    fillId: validated.fillId,
+    exchange: validated.exchange,
+    symbol: validated.symbol,
+    side: validated.side,
+    quantity: qty,
+    priceUsd: roundUsd(validated.priceUsd),
+    feeUsd: roundUsd(validated.feeUsd),
+    executedAt: validated.executedAt,
+  };
+}
+
+function fillsEqual(a: PaperFill, b: PaperFill): boolean {
+  return a.fillId === b.fillId && a.exchange === b.exchange && a.symbol === b.symbol &&
+    a.side === b.side && a.quantity === b.quantity && a.priceUsd === b.priceUsd &&
+    a.feeUsd === b.feeUsd && a.executedAt === b.executedAt;
+}
+
+// ─── Snapshot & helpers ─────────────────────────────────────────
+function buildSnapshot(s: LedgerState): PaperAccountSnapshot {
+  const positions: PaperPosition[] = [];
+  for (const p of s.positions.values()) positions.push(clonePosition(p));
+  const gross = positions.reduce((sum, p) => sum + Math.abs(p.marketValueUsd), 0);
+  const net = positions.reduce((sum, p) => sum + p.marketValueUsd, 0);
+  return {
+    accountId: s.config.accountId, exchange: s.config.exchange,
+    initialCashUsd: s.config.initialCashUsd,
+    cashUsd: s.cashUsd, realizedPnlUsd: s.realizedPnlUsd,
+    unrealizedPnlUsd: s.unrealizedPnlUsd, totalFeesUsd: s.totalFeesUsd,
+    equityUsd: roundUsd(s.cashUsd + net),
+    grossExposureUsd: roundUsd(gross), netExposureUsd: roundUsd(net),
+    openPositions: s.positions.size, processedFills: s.processedFillIds.size,
+    sequence: s.sequence, updatedAt: s.updatedAt, positions,
   };
 }
 
 function positionUnrealizedPnl(p: PaperPosition): number {
   const absQty = Math.abs(p.signedQuantity);
-  if (p.direction === 'long') {
-    return (p.markPriceUsd - p.averageEntryPriceUsd) * absQty;
-  }
-  return (p.averageEntryPriceUsd - p.markPriceUsd) * absQty;
+  return p.direction === 'long'
+    ? (p.markPriceUsd - p.averageEntryPriceUsd) * absQty
+    : (p.averageEntryPriceUsd - p.markPriceUsd) * absQty;
 }
 
 function positionMarketValue(p: PaperPosition): number {
@@ -90,216 +126,214 @@ function positionMarketValue(p: PaperPosition): number {
 }
 
 function verifyInvariants(s: LedgerState): void {
-  // All fields finite
   if (!Number.isFinite(s.cashUsd)) throw new PaperLedgerInvariantError('cashUsd not finite');
-  if (!Number.isFinite(s.realizedPnlUsd)) throw new PaperLedgerInvariantError('realizedPnlUsd not finite');
-  if (!Number.isFinite(s.totalFeesUsd)) throw new PaperLedgerInvariantError('totalFeesUsd not finite');
   if (s.totalFeesUsd < 0) throw new PaperLedgerInvariantError(`totalFeesUsd negative: ${s.totalFeesUsd}`);
-
-  // Per-position checks
-  let totalUnrealized = 0;
-  for (const [symbol, p] of s.positions) {
-    if (p.signedQuantity === 0) throw new PaperLedgerInvariantError(`${symbol}: signedQuantity=0 but position exists`);
-    const absQty = Math.abs(p.signedQuantity);
-    if (absQty < ACCOUNTING_EPSILON) throw new PaperLedgerInvariantError(`${symbol}: near-zero quantity ${absQty}`);
+  let totalUnreal = 0;
+  for (const [sym, p] of s.positions) {
+    if (p.signedQuantity === 0) throw new PaperLedgerInvariantError(`${sym}: signedQuantity=0`);
     if (p.direction !== (p.signedQuantity > 0 ? 'long' : 'short'))
-      throw new PaperLedgerInvariantError(`${symbol}: direction ${p.direction} inconsistent with signedQuantity ${p.signedQuantity}`);
+      throw new PaperLedgerInvariantError(`${sym}: direction mismatch`);
     if (!Number.isFinite(p.averageEntryPriceUsd) || p.averageEntryPriceUsd <= 0)
-      throw new PaperLedgerInvariantError(`${symbol}: invalid averageEntryPriceUsd ${p.averageEntryPriceUsd}`);
+      throw new PaperLedgerInvariantError(`${sym}: invalid avg entry ${p.averageEntryPriceUsd}`);
     if (!Number.isFinite(p.markPriceUsd) || p.markPriceUsd <= 0)
-      throw new PaperLedgerInvariantError(`${symbol}: invalid markPriceUsd ${p.markPriceUsd}`);
-    totalUnrealized += p.unrealizedPnlUsd;
+      throw new PaperLedgerInvariantError(`${sym}: invalid mark ${p.markPriceUsd}`);
+    totalUnreal += p.unrealizedPnlUsd;
   }
-  if (s.positions.size !== (new Set(s.positions.keys())).size)
-    throw new PaperLedgerInvariantError('duplicate positions');
-  if (!Number.isFinite(totalUnrealized)) throw new PaperLedgerInvariantError('total unrealized not finite');
-  if (Math.abs(totalUnrealized - s.unrealizedPnlUsd) > ACCOUNTING_EPSILON)
-    throw new PaperLedgerInvariantError(`unrealized sum mismatch: position sum=${totalUnrealized} vs state=${s.unrealizedPnlUsd}`);
-
-  // Equity equation: equity ≈ initialCash + realized + unrealized
-  const expectedEquity = s.config.initialCashUsd + s.realizedPnlUsd + s.unrealizedPnlUsd;
-  assertAccountingInvariant(s.cashUsd + (() => {
-    let n = 0; for (const p of s.positions.values()) n += p.marketValueUsd; return n;
-  })(), expectedEquity, 'equity equation');
+  if (Math.abs(totalUnreal - roundUsd(s.unrealizedPnlUsd)) > ACCOUNTING_EPSILON || !Number.isFinite(totalUnreal))
+    throw new PaperLedgerInvariantError(`unrealized sum mismatch: ${totalUnreal} vs ${s.unrealizedPnlUsd}`);
 }
 
-function recalcAllUnrealized(state: LedgerState): void {
+function recalcAllUnrealized(st: LedgerState): void {
   let total = 0;
-  for (const [, p] of state.positions) {
+  for (const [, p] of st.positions) {
     p.unrealizedPnlUsd = roundUsd(positionUnrealizedPnl(p));
     p.marketValueUsd = positionMarketValue(p);
     total += p.unrealizedPnlUsd;
   }
-  state.unrealizedPnlUsd = roundUsd(total);
+  st.unrealizedPnlUsd = roundUsd(total);
 }
 
-// ─── PaperAccountLedger ────────────────────────────────────────
+// ─── Apply fill to state (candidate computation) ─────────────────
+function applyFillToState(s: LedgerState, fill: PaperFill): void {
+  const qty = fill.quantity; const price = fill.priceUsd;
+  const fee = fill.feeUsd; const side = fill.side;
+  s.totalFeesUsd = roundUsd(s.totalFeesUsd + fee);
+  if (side === 'buy') s.cashUsd = roundUsd(s.cashUsd - qty * price - fee);
+  else s.cashUsd = roundUsd(s.cashUsd + qty * price - fee);
+
+  const pos = s.positions.get(fill.symbol) ?? null;
+  const oldSigned = pos?.signedQuantity ?? 0;
+  const oldAvg = pos?.averageEntryPriceUsd ?? 0;
+
+  if (oldSigned === 0) {
+    const signedQty = side === 'buy' ? qty : -qty;
+    s.positions.set(fill.symbol, {
+      exchange: fill.exchange, symbol: fill.symbol,
+      direction: side === 'buy' ? 'long' : 'short',
+      signedQuantity: roundQuantity(signedQty),
+      averageEntryPriceUsd: price, markPriceUsd: price,
+      marketValueUsd: 0, unrealizedPnlUsd: 0,
+      openedAt: fill.executedAt, updatedAt: fill.executedAt,
+    });
+    s.realizedPnlUsd = roundUsd(s.realizedPnlUsd - fee);
+  } else if ((side === 'buy' && oldSigned > 0) || (side === 'sell' && oldSigned < 0)) {
+    const oldAbs = Math.abs(oldSigned);
+    const newAbs = oldAbs + qty;
+    const newAvg = (oldAbs * oldAvg + qty * price) / newAbs;
+    pos!.averageEntryPriceUsd = roundUsd(newAvg);
+    pos!.signedQuantity = roundQuantity(oldSigned > 0 ? newAbs : -newAbs);
+    pos!.markPriceUsd = price; pos!.updatedAt = fill.executedAt;
+    s.realizedPnlUsd = roundUsd(s.realizedPnlUsd - fee);
+  } else {
+    const oldAbs = Math.abs(oldSigned);
+    if (qty <= oldAbs) {
+      const realizedGross = oldSigned > 0 ? (price - oldAvg) * qty : (oldAvg - price) * qty;
+      s.realizedPnlUsd = roundUsd(s.realizedPnlUsd + realizedGross - fee);
+      const rem = roundQuantity(oldAbs - qty);
+      if (normalizeZero(rem, QUANTITY_EPSILON) === 0) {
+        s.positions.delete(fill.symbol);
+      } else {
+        pos!.signedQuantity = roundQuantity(oldSigned > 0 ? rem : -rem);
+        pos!.markPriceUsd = price; pos!.updatedAt = fill.executedAt;
+      }
+    } else {
+      const closeQty = oldAbs;
+      const newQty = roundQuantity(qty - oldAbs);
+      const realizedGross = oldSigned > 0 ? (price - oldAvg) * closeQty : (oldAvg - price) * closeQty;
+      s.realizedPnlUsd = roundUsd(s.realizedPnlUsd + realizedGross - fee);
+      s.positions.delete(fill.symbol);
+      if (normalizeZero(newQty, QUANTITY_EPSILON) > 0) {
+        const newDir = side === 'buy' ? 'long' as const : 'short' as const;
+        s.positions.set(fill.symbol, {
+          exchange: fill.exchange, symbol: fill.symbol, direction: newDir,
+          signedQuantity: roundQuantity(side === 'buy' ? newQty : -newQty),
+          averageEntryPriceUsd: price, markPriceUsd: price,
+          marketValueUsd: 0, unrealizedPnlUsd: 0,
+          openedAt: fill.executedAt, updatedAt: fill.executedAt,
+        });
+      }
+    }
+  }
+}
+
+// ═══ PaperAccountLedger ══════════════════════════════════════════
 export class PaperAccountLedger {
   private state: LedgerState;
 
   constructor(config: PaperAccountConfig) {
     validatePaperAccountConfig(config);
     this.state = {
-      config: { ...config },
+      config: cloneConfig(config),
       cashUsd: roundUsd(config.initialCashUsd),
-      realizedPnlUsd: 0,
-      unrealizedPnlUsd: 0,
-      totalFeesUsd: 0,
-      positions: new Map(),
-      entries: [],
-      processedFillIds: new Map(),
-      sequence: 0,
-      updatedAt: 0,
-      lastEventAt: new Map(),
+      realizedPnlUsd: 0, unrealizedPnlUsd: 0, totalFeesUsd: 0,
+      positions: new Map(), entries: [], processedFillIds: new Map(),
+      sequence: 0, updatedAt: 0, lastEventAt: new Map(),
     };
   }
 
-  snapshot(): PaperAccountSnapshot {
-    return buildSnapshot(this.state);
-  }
-
-  entries(): readonly PaperLedgerEntry[] {
-    return [...this.state.entries];
-  }
-
-  hasProcessedFill(fillId: string): boolean {
-    return this.state.processedFillIds.has(fillId);
-  }
-
+  getConfig(): PaperAccountConfig { return cloneConfig(this.state.config); }
+  snapshot(): PaperAccountSnapshot { return buildSnapshot(this.state); }
+  entries(): readonly PaperLedgerEntry[] { return this.state.entries.map(cloneEntry); }
+  hasProcessedFill(fillId: string): boolean { return this.state.processedFillIds.has(fillId); }
   getPosition(symbol: string): PaperPosition | null {
     const p = this.state.positions.get(symbol);
-    return p ? { ...p } : null;
+    return p ? clonePosition(p) : null;
   }
 
   applyFill(fill: PaperFill): { status: 'applied' | 'duplicate'; snapshot: PaperAccountSnapshot } {
-    validatePaperFill(fill);
-    this.assertExchangeMatch(fill.exchange);
-    this.assertTimeOrder(fill.symbol, fill.executedAt);
-
-    // Idempotency check
-    const existing = this.state.processedFillIds.get(fill.fillId);
+    // 1. validate
+    const raw = validatePaperFill(fill);
+    // 2. validate exchange
+    if (!isExchangeId(raw.exchange)) throw new PaperLedgerValidationError(`PaperFill: invalid ExchangeId ${JSON.stringify(raw.exchange)}`);
+    this.assertExchangeMatch(raw.exchange);
+    // 3. canonicalize
+    const canonical = canonicalizeFill(raw);
+    // 4-6. idempotency (BEFORE time check)
+    const existing = this.state.processedFillIds.get(canonical.fillId);
     if (existing) {
-      if (fillsEqual(existing, fill)) {
-        return { status: 'duplicate', snapshot: this.snapshot() };
-      }
-      throw new DuplicateFillConflictError(
-        `fillId ${fill.fillId}: existing ${JSON.stringify(normalizeFill(existing))} vs new ${JSON.stringify(normalizeFill(fill))}`,
-      );
+      if (fillsEqual(existing, canonical)) return { status: 'duplicate', snapshot: this.snapshot() };
+      throw new DuplicateFillConflictError(`fillId ${canonical.fillId}: conflict`);
     }
-
-    // Clone → compute candidate
+    // 7. time order
+    this.assertTimeOrder(canonical.symbol, canonical.executedAt);
+    // 8. compute on clone
     const candidate = cloneState(this.state);
-    applyFillToState(candidate, fill);
+    applyFillToState(candidate, canonical);
     recalcAllUnrealized(candidate);
-
-    // Verify
     try { verifyInvariants(candidate); } catch (e) {
-      throw new PaperLedgerInvariantError(`fill ${fill.fillId}: ${(e as Error).message}`);
+      throw new PaperLedgerInvariantError(`fill ${canonical.fillId}: ${(e as Error).message}`);
     }
-
-    // Commit
+    // commit
     this.state = candidate;
-    this.state.processedFillIds.set(fill.fillId, normalizeFill(fill));
+    this.state.processedFillIds.set(canonical.fillId, canonical);
     this.state.sequence += 1;
-    this.state.updatedAt = Math.max(this.state.updatedAt, fill.executedAt);
-    this.state.lastEventAt.set(fill.symbol, fill.executedAt);
-    this.state.entries.push({ type: 'fill', sequence: this.state.sequence, fill });
-
+    this.state.updatedAt = Math.max(this.state.updatedAt, canonical.executedAt);
+    this.state.lastEventAt.set(canonical.symbol, canonical.executedAt);
+    this.state.entries.push({ type: 'fill', sequence: this.state.sequence, fill: canonical });
     return { status: 'applied', snapshot: this.snapshot() };
   }
 
-  markToMarket(input: {
-    exchange: ExchangeId;
-    symbol: string;
-    markPriceUsd: number;
-    markedAt: number;
-  }): { status: 'applied' | 'duplicate'; snapshot: PaperAccountSnapshot } {
-    const { exchange, symbol, markPriceUsd, markedAt } = input;
+  markToMarket(input: { exchange: ExchangeId; symbol: string; markPriceUsd: number; markedAt: number }): { status: 'applied' | 'duplicate'; snapshot: PaperAccountSnapshot } {
+    const { exchange, symbol, markPriceUsd: rawPrice, markedAt } = input;
+    if (!isExchangeId(exchange)) throw new PaperLedgerValidationError(`mark: invalid ExchangeId ${JSON.stringify(exchange)}`);
     this.assertExchangeMatch(exchange);
-    if (!this.state.positions.has(symbol)) {
-      throw new PaperLedgerValidationError(`mark: no position for ${symbol}`);
-    }
+    const markPriceUsd = roundUsd(rawPrice);
     assertFinitePositive(markPriceUsd, 'markPriceUsd');
-    if (typeof markedAt !== 'number' || !Number.isFinite(markedAt) || !Number.isInteger(markedAt) || markedAt < 0) {
-      throw new PaperLedgerValidationError(`mark: markedAt must be non-negative integer, got ${markedAt}`);
-    }
+    if (!Number.isInteger(markedAt) || markedAt < 0) throw new PaperLedgerValidationError(`markedAt invalid: ${markedAt}`);
+
+    const pos = this.state.positions.get(symbol);
+    if (!pos) throw new PaperLedgerValidationError(`mark: no position for ${symbol}`);
 
     const lastTime = this.state.lastEventAt.get(symbol) ?? 0;
-    if (markedAt < lastTime) {
-      throw new StalePaperLedgerEventError(`mark: ${symbol} markedAt ${markedAt} < lastEvent ${lastTime}`);
-    }
+    if (markedAt < lastTime) throw new StalePaperLedgerEventError(`mark stale: ${symbol} ${markedAt} < ${lastTime}`);
+    // Same-time: compare with current position.markPriceUsd (R1 fix)
     if (markedAt === lastTime) {
-      // Same time check
-      const lastMark = [...this.state.entries].reverse().find(
-        (e): e is PaperMarkLedgerEntry => e.type === 'mark' && e.symbol === symbol && e.markedAt === markedAt,
-      );
-      if (lastMark) {
-        if (lastMark.markPriceUsd === markPriceUsd) {
-          return { status: 'duplicate', snapshot: this.snapshot() };
-        }
-        throw new ConflictingMarkError(
-          `mark: ${symbol} at ${markedAt}: existing price ${lastMark.markPriceUsd} vs new ${markPriceUsd}`,
-        );
-      }
+      if (pos.markPriceUsd === markPriceUsd) return { status: 'duplicate', snapshot: this.snapshot() };
+      throw new ConflictingMarkError(`mark conflict: ${symbol}@${markedAt}: current ${pos.markPriceUsd} vs new ${markPriceUsd}`);
     }
 
-    // No conflict found at same time without prior mark — proceed
-    // Clone and apply
     const candidate = cloneState(this.state);
-    const pos = candidate.positions.get(symbol);
-    if (!pos) throw new PaperLedgerValidationError(`mark: no position for ${symbol}`);
-    pos.markPriceUsd = markPriceUsd;
-    pos.updatedAt = markedAt;
+    const cpos = candidate.positions.get(symbol)!;
+    cpos.markPriceUsd = markPriceUsd; cpos.updatedAt = markedAt;
     recalcAllUnrealized(candidate);
-
     try { verifyInvariants(candidate); } catch (e) {
       throw new PaperLedgerInvariantError(`mark ${symbol}@${markedAt}: ${(e as Error).message}`);
     }
-
     this.state = candidate;
     this.state.sequence += 1;
     this.state.updatedAt = Math.max(this.state.updatedAt, markedAt);
     this.state.lastEventAt.set(symbol, markedAt);
     this.state.entries.push({ type: 'mark', sequence: this.state.sequence, exchange, symbol, markPriceUsd, markedAt });
-
     return { status: 'applied', snapshot: this.snapshot() };
   }
 
+  // Atomic replay (R1): temp ledger, no clear until all pass
   replay(entries: readonly PaperLedgerEntry[]): void {
-    // Reset to initial state and replay from scratch
-    this.state = {
-      config: { ...this.state.config },
-      cashUsd: roundUsd(this.state.config.initialCashUsd),
-      realizedPnlUsd: 0,
-      unrealizedPnlUsd: 0,
-      totalFeesUsd: 0,
-      positions: new Map(),
-      entries: [],
-      processedFillIds: new Map(),
-      sequence: 0,
-      updatedAt: 0,
-      lastEventAt: new Map(),
-    };
-
+    if (!Array.isArray(entries)) throw new PaperLedgerCorruptionError('entries must be an array');
+    const temp = new PaperAccountLedger(this.state.config);
     let expectedSeq = 0;
-    for (const entry of entries) {
+    for (const e of entries) {
+      if (!e || typeof e !== 'object' || Array.isArray(e))
+        throw new PaperLedgerCorruptionError(`invalid entry: ${JSON.stringify(e)}`);
       expectedSeq += 1;
-      if (entry.sequence !== expectedSeq) {
-        throw new PaperLedgerCorruptionError(
-          `replay: expected sequence ${expectedSeq}, got ${entry.sequence}`,
-        );
-      }
-      if (entry.type === 'fill') {
-        this.applyFill(entry.fill);
-      } else if (entry.type === 'mark') {
-        this.markToMarket({
-          exchange: entry.exchange,
-          symbol: entry.symbol,
-          markPriceUsd: entry.markPriceUsd,
-          markedAt: entry.markedAt,
-        });
+      if (e.sequence !== expectedSeq)
+        throw new PaperLedgerCorruptionError(`sequence: expected ${expectedSeq}, got ${e.sequence}`);
+      if (e.type === 'fill') {
+        if (!e.fill) throw new PaperLedgerCorruptionError('fill entry missing fill');
+        temp.applyFill(e.fill);
+      } else if (e.type === 'mark') {
+        const m = e as PaperMarkLedgerEntry;
+        if (!m.symbol || !m.markPriceUsd) throw new PaperLedgerCorruptionError('malformed mark entry');
+        temp.markToMarket({ exchange: m.exchange, symbol: m.symbol, markPriceUsd: m.markPriceUsd, markedAt: m.markedAt });
+      } else {
+        throw new PaperLedgerCorruptionError(`unknown entry type: ${(e as any).type}`);
       }
     }
+    // Verify final state
+    verifyInvariants(temp.state);
+    if (temp.state.entries.length !== entries.length) throw new PaperLedgerCorruptionError('entry count mismatch after replay');
+    // Atomic swap
+    this.state = temp.state;
   }
 
   static fromEntries(config: PaperAccountConfig, entries: readonly PaperLedgerEntry[]): PaperAccountLedger {
@@ -309,152 +343,11 @@ export class PaperAccountLedger {
   }
 
   private assertExchangeMatch(exchange: ExchangeId): void {
-    if (exchange !== this.state.config.exchange) {
-      throw new PaperLedgerExchangeMismatchError(
-        `Ledger exchange ${this.state.config.exchange}, got ${JSON.stringify(exchange)}`,
-      );
-    }
+    if (exchange !== this.state.config.exchange)
+      throw new PaperLedgerExchangeMismatchError(`exchange: ${JSON.stringify(exchange)} vs ${this.state.config.exchange}`);
   }
-
   private assertTimeOrder(symbol: string, time: number): void {
     const last = this.state.lastEventAt.get(symbol);
-    if (last != null && time < last) {
-      throw new StalePaperLedgerEventError(`${symbol}: time ${time} < lastEventAt ${last}`);
-    }
-  }
-}
-
-// ─── Fill helpers (module-level, no state access) ──────────────
-
-function normalizeFill(f: PaperFill): PaperFill {
-  return {
-    fillId: f.fillId,
-    exchange: f.exchange,
-    symbol: f.symbol,
-    side: f.side,
-    quantity: f.quantity,
-    priceUsd: f.priceUsd,
-    feeUsd: f.feeUsd,
-    executedAt: f.executedAt,
-  };
-}
-
-function fillsEqual(a: PaperFill, b: PaperFill): boolean {
-  return (
-    a.fillId === b.fillId &&
-    a.exchange === b.exchange &&
-    a.symbol === b.symbol &&
-    a.side === b.side &&
-    a.quantity === b.quantity &&
-    a.priceUsd === b.priceUsd &&
-    a.feeUsd === b.feeUsd &&
-    a.executedAt === b.executedAt
-  );
-}
-
-// ─── State mutation (used during candidate computation) ────────
-
-function applyFillToState(s: LedgerState, fill: PaperFill): void {
-  const qty = fill.quantity;
-  const price = fill.priceUsd;
-  const fee = fill.feeUsd;
-  const side = fill.side;
-
-  // Cash and fee accounting
-  s.totalFeesUsd = roundUsd(s.totalFeesUsd + fee);
-
-  const pos = s.positions.get(fill.symbol) ?? null;
-  const oldSigned = pos?.signedQuantity ?? 0;
-  const oldAvgEntry = pos?.averageEntryPriceUsd ?? 0;
-
-  if (side === 'buy') {
-    // Buy: cash decreases by (qty × price + fee)
-    s.cashUsd = roundUsd(s.cashUsd - qty * price - fee);
-  } else {
-    // Sell: cash increases by (qty × price - fee)
-    s.cashUsd = roundUsd(s.cashUsd + qty * price - fee);
-  }
-
-  // Determine what happens to the position
-  if (oldSigned === 0) {
-    // Opening new position
-    const signedQty = side === 'buy' ? qty : -qty;
-    const direction = side === 'buy' ? 'long' as const : 'short' as const;
-    s.positions.set(fill.symbol, {
-      exchange: fill.exchange,
-      symbol: fill.symbol,
-      direction,
-      signedQuantity: roundQuantity(signedQty),
-      averageEntryPriceUsd: price,
-      markPriceUsd: price,
-      marketValueUsd: 0, // computed later
-      unrealizedPnlUsd: 0,
-      openedAt: fill.executedAt,
-      updatedAt: fill.executedAt,
-    });
-    // Realized PnL: opening fee only
-    s.realizedPnlUsd = roundUsd(s.realizedPnlUsd - fee);
-  } else if ((side === 'buy' && oldSigned > 0) || (side === 'sell' && oldSigned < 0)) {
-    // Same direction — add to position
-    const oldAbs = Math.abs(oldSigned);
-    const newAbs = oldAbs + qty;
-    const newAvg = (oldAbs * oldAvgEntry + qty * price) / newAbs;
-    pos!.averageEntryPriceUsd = newAvg;
-    pos!.signedQuantity = roundQuantity(oldSigned > 0 ? newAbs : -newAbs);
-    pos!.markPriceUsd = price;
-    pos!.updatedAt = fill.executedAt;
-    // openerAt preserved
-    s.positions.set(fill.symbol, pos!);
-    s.realizedPnlUsd = roundUsd(s.realizedPnlUsd - fee);
-  } else if ((side === 'sell' && oldSigned > 0) || (side === 'buy' && oldSigned < 0)) {
-    // Opposite direction — close or flip
-    const oldAbs = Math.abs(oldSigned);
-    if (qty <= oldAbs) {
-      // Partial or full close
-      const closeQty = qty;
-      const realizedGross = oldSigned > 0
-        ? (price - oldAvgEntry) * closeQty   // long sell
-        : (oldAvgEntry - price) * closeQty;   // short cover
-      s.realizedPnlUsd = roundUsd(s.realizedPnlUsd + realizedGross - fee);
-
-      const remainingAbs = oldAbs - closeQty;
-      if (normalizeZero(remainingAbs) === 0) {
-        s.positions.delete(fill.symbol);
-      } else {
-        pos!.signedQuantity = roundQuantity(oldSigned > 0 ? remainingAbs : -remainingAbs);
-        pos!.markPriceUsd = price;
-        pos!.updatedAt = fill.executedAt;
-        s.positions.set(fill.symbol, pos!);
-      }
-    } else {
-      // Flip — close entire old position, open new opposite
-      const closeQty = oldAbs;
-      const newQty = qty - oldAbs;
-
-      // Realized from closing
-      const realizedGross = oldSigned > 0
-        ? (price - oldAvgEntry) * closeQty
-        : (oldAvgEntry - price) * closeQty;
-      s.realizedPnlUsd = roundUsd(s.realizedPnlUsd + realizedGross - fee);
-
-      // Remove old position
-      s.positions.delete(fill.symbol);
-
-      // Open new opposite position
-      const newDir = side === 'buy' ? 'long' as const : 'short' as const;
-      const newSigned = side === 'buy' ? newQty : -newQty;
-      s.positions.set(fill.symbol, {
-        exchange: fill.exchange,
-        symbol: fill.symbol,
-        direction: newDir,
-        signedQuantity: roundQuantity(newSigned),
-        averageEntryPriceUsd: price,
-        markPriceUsd: price,
-        marketValueUsd: 0,
-        unrealizedPnlUsd: 0,
-        openedAt: fill.executedAt,
-        updatedAt: fill.executedAt,
-      });
-    }
+    if (last != null && time < last) throw new StalePaperLedgerEventError(`${symbol}: time ${time} < ${last}`);
   }
 }

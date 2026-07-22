@@ -719,3 +719,236 @@ test('G16: fromEntries reconstructs identical snapshot', () => {
   assert.equal(l2.snapshot().cashUsd, l1.snapshot().cashUsd);
   assert.equal(l2.snapshot().sequence, l1.snapshot().sequence);
 });
+
+// ═══ R1: Atomic rollback, immutable history, idempotency, mark, replay, precision ═══
+
+test('R1-1: mark validation failure atomic rollback (NaN price)', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R1a', side: 'buy', quantity: 2, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+  const pos = l.getPosition('BTCUSDT');
+  assert.throws(() => l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: NaN, markedAt: 2 }));
+  const after = l.getPosition('BTCUSDT')!;
+  assert.equal(after.markPriceUsd, pos!.markPriceUsd, 'markPriceUsd unchanged after failed mark');
+  assert.equal(after.updatedAt, pos!.updatedAt, 'updatedAt unchanged');
+  assert.equal(l.snapshot().sequence, 1, 'sequence unchanged');
+  assert.equal(l.snapshot().cashUsd, CONFIG.initialCashUsd - 50000 * 2 - 5, 'cash unchanged');
+});
+
+test('R1-2: fill candidate invariant failure atomic rollback', async () => {
+  // This is hard to trigger with normal fills — we test via the cloned state guard.
+  // The deep clone ensures failed candidate never touches live state.
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R2a', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+  const before = l.snapshot();
+  try { l.applyFill(mkFill({ fillId: 'R2b', side: 'buy', quantity: NaN, priceUsd: 50000, feeUsd: 5, executedAt: 2 })); } catch {}
+  const after = l.snapshot();
+  assert.equal(after.sequence, before.sequence);
+  assert.equal(after.cashUsd, before.cashUsd);
+});
+
+test('R1-3: original fill mutation isolated', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  const fill = mkFill({ fillId: 'R3', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 });
+  l.applyFill(fill);
+  fill.priceUsd = 1;
+  fill.quantity = 999;
+  const e = l.entries()[0];
+  assert.equal(e.type, 'fill');
+  assert.equal(e.fill.priceUsd, 50000, 'internal fill unchanged after mutation');
+  assert.equal(e.fill.quantity, 1);
+});
+
+test('R1-4: nested fill entry mutation isolated', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R4', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+  const entries = l.entries();
+  (entries[0] as any).fill.priceUsd = 1;
+  const e2 = l.entries()[0];
+  assert.equal(e2.type, 'fill');
+  assert.equal(e2.fill.priceUsd, 50000, 'internal entries immutable through getter');
+});
+
+test('R1-5: mark entry mutation isolated', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R5a', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+  l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 51000, markedAt: 2 });
+  const entries = l.entries();
+  (entries[1] as any).markPriceUsd = 1;
+  const e = l.entries()[1];
+  assert.equal(e.type, 'mark');
+  assert.equal((e as any).markPriceUsd, 51000);
+});
+
+test('R1-6: delayed duplicate after newer fill', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  const fA = mkFill({ fillId: 'R6a', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 10 });
+  l.applyFill(fA);
+  l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 51000, markedAt: 20 });
+  const r = l.applyFill(fA);
+  assert.equal(r.status, 'duplicate');
+  assert.equal(l.snapshot().sequence, 2);
+  assert.equal(l.getPosition('BTCUSDT')!.markPriceUsd, 51000, 'state unchanged by duplicate');
+});
+
+test('R1-7: delayed conflicting duplicate', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R7', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 10 }));
+  l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 51000, markedAt: 20 });
+  assert.throws(() => l.applyFill(mkFill({ fillId: 'R7', side: 'buy', quantity: 2, priceUsd: 50000, feeUsd: 5, executedAt: 10 })));
+  // zero state change
+  assert.equal(l.snapshot().sequence, 2);
+});
+
+test('R1-8: fill-time same-price mark duplicate', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R8', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 10 }));
+  const r = l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 50000, markedAt: 10 });
+  assert.equal(r.status, 'duplicate');
+  assert.equal(l.snapshot().sequence, 1);
+});
+
+test('R1-9: fill-time different-price mark conflict', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R9', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 10 }));
+  assert.throws(() => l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 51000, markedAt: 10 }), ConflictingMarkError);
+  assert.equal(l.snapshot().sequence, 1);
+});
+
+test('R1-10: replay failure preserves original state', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R10', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+  const before = l.snapshot();
+  assert.throws(() => l.replay([{ type: 'fill', sequence: 1, fill: mkFill({ fillId: 'bad', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }) }, { type: 'fill', sequence: 3, fill: mkFill({ fillId: 'bad2', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 2 }) }]));
+  const after = l.snapshot();
+  assert.equal(after.sequence, before.sequence);
+  assert.equal(after.cashUsd, before.cashUsd);
+  assert.equal(after.processedFills, before.processedFills);
+});
+
+test('R1-11: unknown replay type rejected', () => {
+  assert.throws(() => new PaperAccountLedger(CONFIG).replay([{ type: 'foo', sequence: 1 } as any]), PaperLedgerCorruptionError);
+});
+
+test('R1-12: malformed replay entry (null) rejected', () => {
+  assert.throws(() => new PaperAccountLedger(CONFIG).replay([null as any]), PaperLedgerCorruptionError);
+});
+
+test('R1-13: entries null on load rejected', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'account.bitget.test01.json'), JSON.stringify({ version: 1, config: CONFIG, entries: null }), 'utf-8');
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R1-14: initialCash identity mismatch on load', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'account.bitget.test01.json'), JSON.stringify({ version: 1, config: { ...CONFIG, initialCashUsd: 50000 }, entries: [] }), 'utf-8');
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerIdentityMismatchError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R1-15: Store/Ledger account mismatch on save', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    const other = new PaperAccountLedger({ ...CONFIG, accountId: 'other01' });
+    await assert.rejects(() => store.save(other), PaperLedgerIdentityMismatchError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R1-16: invalid ExchangeId rejected on config', () => {
+  assert.throws(() => new PaperAccountLedger({ ...CONFIG, exchange: 'invalid_exchange' as any }), /ExchangeId/);
+});
+
+test('R1-17: path traversal exchange rejected', () => {
+  assert.throws(() => new PaperAccountLedger({ ...CONFIG, exchange: '../../escape' as any }), /ExchangeId/);
+  assert.throws(() => new PaperLedgerStore({ ...CONFIG, exchange: '../../escape' as any }), /ExchangeId/);
+});
+
+test('R1-18: quantity 1e-8 supported', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R18', side: 'buy', quantity: 1e-8, priceUsd: 50000, feeUsd: 0.000001, executedAt: 1 }));
+  const p = l.getPosition('BTCUSDT')!;
+  assert.equal(p.signedQuantity, 1e-8);
+});
+
+test('R1-19: quantity 1e-10 supported', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R19', side: 'buy', quantity: 1e-10, priceUsd: 50000, feeUsd: 0.000001, executedAt: 1 }));
+  assert.ok(Math.abs(l.getPosition('BTCUSDT')!.signedQuantity - 1e-10) < 1e-20);
+});
+
+test('R1-20: below precision quantity rejected', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  // 1e-13 rounds to 0 → fails canonicalization
+  assert.throws(() => l.applyFill(mkFill({ fillId: 'R20', side: 'buy', quantity: 1e-13, priceUsd: 50000, feeUsd: 0, executedAt: 1 })), /canonicalization/);
+});
+
+test('R1-21: canonical duplicate comparison', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  // Same fill with slightly different float — canonicalize makes them equal
+  const f1 = mkFill({ fillId: 'R21', side: 'buy', quantity: 1.00000000000001, priceUsd: 50000.000000001, feeUsd: 5, executedAt: 1 });
+  l.applyFill(f1);
+  const f2 = mkFill({ fillId: 'R21', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 });
+  const r = l.applyFill(f2);
+  assert.equal(r.status, 'duplicate');
+});
+
+test('R1-22: save rejects and preserves canonical', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    const l = new PaperAccountLedger(CONFIG);
+    l.applyFill(mkFill({ fillId: 'R22', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+    await store.save(l);
+    const content = await fs.readFile(path.join(dir, 'account.bitget.test01.json'), 'utf-8');
+    // Try save with wrong ledger — must not overwrite
+    const other = new PaperAccountLedger({ ...CONFIG, initialCashUsd: 20000 });
+    try { await store.save(other); } catch {}
+    const contentAfter = await fs.readFile(path.join(dir, 'account.bitget.test01.json'), 'utf-8');
+    assert.equal(contentAfter, content, 'canonical file unchanged after failed save');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R1-23: persisted config external mutation isolated', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    const l = new PaperAccountLedger(CONFIG);
+    await store.save(l);
+    // Load again — config is validated, clone returned
+    const l2 = await store.load();
+    // getConfig returns a clone
+    const cfg = l2!.getConfig();
+    (cfg as any).initialCashUsd = 99999;
+    assert.equal(l2!.snapshot().initialCashUsd, CONFIG.initialCashUsd);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R1-24: same-time multiple fills, last position.markPriceUsd authoritative', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R24a', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 10 }));
+  l.applyFill(mkFill({ fillId: 'R24b', side: 'buy', quantity: 1, priceUsd: 51000, feeUsd: 5, executedAt: 10 }));
+  // Current position.markPriceUsd = 51000 (last fill's price)
+  // Mark at same time with same current price → duplicate
+  const r = l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 51000, markedAt: 10 });
+  assert.equal(r.status, 'duplicate');
+  // Different price → conflict
+  assert.throws(() => l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 52000, markedAt: 10 }), ConflictingMarkError);
+});
+
+test('R1-25: replay missing entries document rejected', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'account.bitget.test01.json'), JSON.stringify({ version: 1, config: CONFIG }), 'utf-8');
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

@@ -3,6 +3,7 @@
 export const USD_DECIMALS = 8;
 export const QUANTITY_DECIMALS = 12;
 export const ACCOUNTING_EPSILON = 1e-7;
+export const QUANTITY_EPSILON = 0.5 * (10 ** -QUANTITY_DECIMALS); // 5e-13
 
 /** Round USD-denominated values to 8 decimal places. */
 export function roundUsd(value: number): number {
