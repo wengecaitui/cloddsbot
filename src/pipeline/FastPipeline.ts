@@ -31,6 +31,7 @@ import type { Series } from '../data/types';
 import { computePositionUsd } from './PositionSizer';
 import type { TradeIntent } from '../types/trade-intent';
 import { createTradeIntent } from '../types/trade-intent';
+import { validateTradeCandidate } from './TradeIntentValidation';
 
 export interface FastPipelineMarketData {
   readonly exchange: ExchangeId;
@@ -369,53 +370,31 @@ export class FastPipeline extends EventEmitter {
       });
     };
 
-    // ─── Direction validation (runtime, not `as` cast) ───
-    if (deResult.direction !== 'long' && deResult.direction !== 'short') {
-      const reason = `[DIR] ${signal.symbol}: DecisionEngine direction not long/short — got ${JSON.stringify(deResult.direction)}`;
-      emitRejected('direction_validation', reason);
+    // ─── Stage 3B4C7-R2: candidate validation via pure function ───
+    const candidate = validateTradeCandidate({
+      engineDecision: deResult.decision,
+      engineDirection: deResult.direction,
+      biasDirection: bias?.direction,
+      symbol: signal.symbol,
+    });
+    if (!candidate.ok) {
+      emitRejected(candidate.stage, candidate.reason);
       return {
         exchange: this.config.exchange,
         decision: 'defense',
         direction: 'hold',
         symbol: signal.symbol,
-        reason,
+        reason: candidate.reason,
         elapsedMs: Date.now() - startTime,
         biasReport,
       };
     }
-    // DE-verified direction — guaranteed 'long' | 'short' after the gate above.
-    const dir: 'long' | 'short' = deResult.direction;
-
-    // ─── Bias validation ───
-    if (!bias) {
-      const reason = `[BIAS] ${signal.symbol}: no bias asset`;
-      emitRejected('bias_validation', reason);
-      return {
-        exchange: this.config.exchange,
-        decision: 'defense',
-        direction: 'hold',
-        symbol: signal.symbol,
-        reason,
-        elapsedMs: Date.now() - startTime,
-        biasReport,
-      };
-    }
-    if (bias.direction !== dir) {
-      const reason = `[BIAS] ${signal.symbol}: bias.direction (${bias.direction}) !== DecisionEngine direction (${dir})`;
-      emitRejected('bias_validation', reason);
-      return {
-        exchange: this.config.exchange,
-        decision: 'defense',
-        direction: 'hold',
-        symbol: signal.symbol,
-        reason,
-        elapsedMs: Date.now() - startTime,
-        biasReport,
-      };
-    }
+    const dir: 'long' | 'short' = candidate.direction;
+    // validateTradeCandidate guarantees bias exists and direction matches
+    const asset = bias!;
 
     // Validate suggestedPositionPct
-    const suggestedPct = bias.suggestedPositionPct;
+    const suggestedPct = asset.suggestedPositionPct;
     if (typeof suggestedPct !== 'number' || !Number.isFinite(suggestedPct) || suggestedPct <= 0 || suggestedPct > 1) {
       const reason = `[SIZER] ${signal.symbol}: invalid suggestedPositionPct=${suggestedPct}`;
       emitRejected('position_sizing', reason);
