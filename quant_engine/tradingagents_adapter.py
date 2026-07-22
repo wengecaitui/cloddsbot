@@ -364,7 +364,17 @@ def main():
 
         request_type = request.get("type", "")
         correlation_id = request.get("correlationId", "")
+        # Stage 3B4C6: flatten-top-level protocol compatibility.
+        # sendPayload spreads body fields flat: {type, correlationId, asset, ...}.
+        # Legacy tradingagents_adapter sent {type, payload: {asset, ...}}.
+        # Merge both: nested "payload" is baseline, top-level fields fill gaps.
         payload = request.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        for key, val in request.items():
+            if key in ("type", "correlationId", "payload"):
+                continue
+            payload.setdefault(key, val)
 
         handler = HANDLERS.get(request_type)
         if handler is None:
