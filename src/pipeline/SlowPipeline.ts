@@ -72,7 +72,7 @@ export class SlowPipeline extends EventEmitter {
     this.clock = config.clock ?? { now: () => Date.now() };
   }
 
-  /** 确保适配器进程已启动（惰性初始化，仅一次） */
+  /** 确保适配器进程已启动（惰性初始化，支持 init 失败后重试） */
   private async ensureAdapter(): Promise<PythonBridgeDaemon> {
     if (this.bridge) return this.bridge;
 
@@ -86,8 +86,14 @@ export class SlowPipeline extends EventEmitter {
       })();
     }
 
-    await this.bridgeInitPromise;
-    return this.bridge!;
+    try {
+      await this.bridgeInitPromise;
+      return this.bridge!;
+    } catch (err) {
+      // Stage 3B4C6: clear init promise so next run() retries
+      this.bridgeInitPromise = null;
+      throw err;
+    }
   }
 
   async run(
@@ -239,13 +245,17 @@ export class SlowPipeline extends EventEmitter {
       },
     };
   }
-
   /**
-   * 关闭适配器进程。
+   * 关闭适配器进程（幂等）。
+   * Stage 3B4C6: cached shutdownPromise guards double-shutdown race.
    */
+  private shutdownPromise: Promise<void> | null = null;
   shutdown(): void {
-    this.bridge?.shutdown();
-    this.bridge = null;
-    this.bridgeInitPromise = null;
+    if (this.shutdownPromise) return;
+    this.shutdownPromise = Promise.resolve().then(async () => {
+      this.bridge?.shutdown();
+      this.bridge = null;
+      this.bridgeInitPromise = null;
+    });
   }
 }
