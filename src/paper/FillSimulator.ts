@@ -31,11 +31,14 @@ export interface SimulateResult {
 function computeFillId(
   exchange: ExchangeId, symbol: string, side: 'buy' | 'sell',
   quantity: number, priceUsd: number, feeUsd: number, executedAt: number,
-  counter: number, prefix: string,
+  _counter: number, prefix: string,
 ): string {
   if (typeof prefix !== 'string' || !PREFIX_RE.test(prefix))
     throw new Error(`FillSimulator: fillIdPrefix must match /^[A-Za-z0-9_-]{1,32}$/, got ${JSON.stringify(prefix)}`);
-  const canonical = `${exchange}|${symbol}|${side}|${quantity}|${priceUsd}|${feeUsd}|${executedAt}|${counter}`;
+  // R4: canonical fill identity — hash canonical fill data only, NOT counter.
+  // Same fill = same ID regardless of counter. Counter only used for disambiguation
+  // in PaperExecutionService's internal tracking, not in ID.
+  const canonical = `${exchange}|${symbol}|${side}|${quantity}|${priceUsd}|${feeUsd}|${executedAt}`;
   const digest = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
   const id = `${prefix}-${digest}`;
   if (id.length > MAX_FILLID_LEN)

@@ -55,8 +55,8 @@ test('16. short fee also computed from executedNotional', () => {
 test('17. same canonical fill + same counter → same fillId', () => {
   assert.equal(f(17).fill.fillId, f(17).fill.fillId);
 });
-test('18. different counter → different fillId', () => {
-  assert.notEqual(f(18).fill.fillId, f(19).fill.fillId);
+test('18. same canonical data → same fillId regardless of counter', () => {
+  assert.equal(f(18).fill.fillId, f(19).fill.fillId, 'same canonical fill → same ID');
 });
 test('19. fillId has <prefix>-<32 hex> format', () => {
   const id = f(19).fill.fillId;
@@ -107,10 +107,10 @@ test('29. same canonical input (same rounding) = same fillId', () => {
   const b = f(29); // same counter, same everything → identical
   assert.equal(a.fill.fillId, b.fill.fillId);
 });
-test('30. fillId collision resistance 200 counters', () => {
+test('30. same canonical → all 200 produce same fillId', () => {
   const ids = new Set<string>();
   for (let i = 0; i < 200; i++) ids.add(f(i).fill.fillId);
-  assert.equal(ids.size, 200);
+  assert.equal(ids.size, 1, 'all same canonical → same fillId');
 });
 test('31. empty prefix rejected', () => {
   assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, fillIdPrefix: '' }, 31), /fillIdPrefix/);
@@ -135,10 +135,10 @@ test('35. short fill accepted by Ledger', () => {
   assert.equal(l.applyFill(r.fill).status, 'applied');
   assert.ok(l.getPosition('BTCUSDT')!.signedQuantity < 0);
 });
-test('36. two different fills (diff counter) → both accepted (no conflict)', () => {
+test('36. two different intents → both accepted', () => {
   const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 100_000 });
-  l.applyFill(f(36).fill);
-  l.applyFill(f(37).fill);
+  l.applyFill(simulateFill(BASE_INTENT, CFG, 36).fill);
+  l.applyFill(simulateFill({ ...BASE_INTENT, direction: 'short' }, CFG, 37).fill);
   assert.equal(l.snapshot().processedFills, 2);
 });
 test('37. same fill twice → duplicate', () => {

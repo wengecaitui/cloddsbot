@@ -286,10 +286,10 @@ test('34. entries length matches sequence', async () => {
   await b.execute({ ...INTENT, direction: 'short' }, SCFG, 49);
   assert.equal(b.entries().length, b.snapshot().sequence);
 });
-test('35. buy + buy adds to position (avg price)', async () => {
+test('35. buy + buy adds to position (different amounts → unique fills)', async () => {
   const b = await PaperBroker.open(CONFIG, new FakeStore());
   await b.execute(INTENT, SCFG, 50);
-  await b.execute(INTENT, SCFG, 51);
+  await b.execute({ ...INTENT, positionUsd: 3000 }, SCFG, 51);
   assert.equal(b.snapshot().processedFills, 2);
   assert.equal(b.snapshot().openPositions, 1);
 });
