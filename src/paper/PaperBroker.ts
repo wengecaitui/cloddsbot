@@ -3,10 +3,12 @@
 // No new accounting, risk, pricing, or trading. Async-safe serial queue.
 
 import type { PaperAccountConfig, PaperAccountSnapshot, PaperLedgerEntry } from '../types/paper-account';
+import { canonicalizePaperAccountConfig } from '../types/paper-account';
 import type { TradeIntent } from '../types/trade-intent';
 import type { PaperFill } from '../types/paper-fill';
 import { PaperAccountLedger } from './PaperAccountLedger';
 import { simulateFill, type FillSimulatorConfig } from './FillSimulator';
+import { PaperLedgerIdentityMismatchError } from './errors';
 
 export interface PaperBrokerPersistence {
   load(): Promise<PaperAccountLedger | null>;
@@ -31,14 +33,15 @@ export class PaperBroker {
   }
 
   static async open(config: PaperAccountConfig, store: PaperBrokerPersistence): Promise<PaperBroker> {
+    const canonical = canonicalizePaperAccountConfig(config);
     const stored = await store.load();
     if (stored) {
       const sc = stored.getConfig();
-      if (sc.accountId !== config.accountId || sc.exchange !== config.exchange)
-        throw new Error('PaperBroker: persisted ledger identity mismatch');
+      if (sc.accountId !== canonical.accountId || sc.exchange !== canonical.exchange || sc.initialCashUsd !== canonical.initialCashUsd)
+        throw new PaperLedgerIdentityMismatchError('Broker: persisted ledger identity mismatch');
       return new PaperBroker(stored, store);
     }
-    return new PaperBroker(new PaperAccountLedger(config), store);
+    return new PaperBroker(new PaperAccountLedger(canonical), store);
   }
 
   snapshot(): PaperAccountSnapshot { return this.ledger.snapshot(); }
