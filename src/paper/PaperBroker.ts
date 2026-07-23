@@ -23,7 +23,7 @@ export interface PaperBrokerResult {
 export class PaperBroker {
   private ledger: PaperAccountLedger;
   private readonly store: PaperBrokerPersistence;
-  private queue: Promise<void> = Promise.resolve();
+  private queue: Promise<unknown> = Promise.resolve();
 
   private constructor(ledger: PaperAccountLedger, store: PaperBrokerPersistence) {
     this.ledger = ledger;
@@ -50,7 +50,7 @@ export class PaperBroker {
     const run = () => this._doExecute(intent, config, counter);
     // Chain onto the tail of the queue, catching errors so the queue isn't permanently broken
     this.queue = this.queue.then(run, run);
-    return this.queue;
+    return this.queue as Promise<PaperBrokerResult>;
   }
 
   private async _doExecute(intent: TradeIntent, cfg: FillSimulatorConfig, counter: number): Promise<PaperBrokerResult> {
