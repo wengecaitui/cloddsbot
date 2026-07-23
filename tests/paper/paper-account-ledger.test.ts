@@ -1095,3 +1095,39 @@ test('R3-STORE-CORR: JSON array → corruption', async () => {
     await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// ═══ R4: Persisted config canonicalization tests ═══
+test('R4-LOAD-CANONICAL: persisted 1e-10 → corruption', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'account.bitget.test.json'), JSON.stringify({ version: 1, config: { accountId: 'test', exchange: 'bitget', initialCashUsd: 1e-10 }, entries: [] }), 'utf-8');
+    // Store uses same 1e-10 — identity passes, but canonicalization rejects
+    const store = new PaperLedgerStore({ accountId: 'test', exchange: 'bitget', initialCashUsd: 10000 }, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R4-LOAD-CANONICAL: persisted MAX_VALUE → corruption', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'account.bitget.test.json'), JSON.stringify({ version: 1, config: { accountId: 'test', exchange: 'bitget', initialCashUsd: Number.MAX_VALUE }, entries: [] }), 'utf-8');
+    const store = new PaperLedgerStore({ accountId: 'test', exchange: 'bitget', initialCashUsd: 10000 }, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R4-LOAD-CANONICAL: excess decimal cash loads with canonical value', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    const store = new PaperLedgerStore({ accountId: 'test', exchange: 'bitget', initialCashUsd: 10000.000000001 }, { baseDir: dir });
+    const l = new PaperAccountLedger({ accountId: 'test', exchange: 'bitget', initialCashUsd: 10000.000000001 });
+    l.applyFill(mkFill({ fillId: 'R4LC', side: 'buy', quantity: 0.1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+    await store.save(l);
+    const loaded = await store.load();
+    assert.ok(loaded, 'loaded');
+    assert.equal(loaded!.snapshot().initialCashUsd, 10000);
+    assert.equal(loaded!.getConfig().initialCashUsd, 10000);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
