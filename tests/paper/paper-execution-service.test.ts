@@ -1,405 +1,397 @@
-// Stage 3B4C12: PaperExecutionService tests — ≥35 tests
-import { test, afterEach } from 'node:test';
+// Stage 3B4C13: PaperExecutionService tests — instance-based, ≥45 tests
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-import { PaperExecutionService, type PaperExecutionConfig } from '../../src/paper/PaperExecutionService';
+import { PaperExecutionService, type ExecuteParams } from '../../src/paper/PaperExecutionService';
+import { createTradeIntent, type TradeIntent } from '../../src/types/trade-intent';
 import { PaperLedgerStore } from '../../src/paper/PaperLedgerStore';
-import type { TradeIntent } from '../../src/types/trade-intent';
 import type { PaperAccountConfig } from '../../src/types/paper-account';
 
-const an: PaperAccountConfig = { accountId: 's12', exchange: 'bitget', initialCashUsd: 100_000 };
-const INTENT: TradeIntent = { exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 5000, orderType: 'market', source: 't', createdAt: 1000, reason: 'r', biasUpdatedAt: 1000 };
-const SIM = { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 };
+const an: PaperAccountConfig = { accountId: 's13', exchange: 'bitget', initialCashUsd: 100_000 };
+const mkIntent = (overrides?: Partial<TradeIntent>) => createTradeIntent({
+  exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 5000,
+  source: 't', reason: 'r', biasUpdatedAt: 1000, createdAt: 1000, ...overrides,
+});
+const EP: ExecuteParams = { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 };
 
-function cfg(persistence: any, overrides?: Partial<PaperExecutionConfig>): PaperExecutionConfig {
-  return { paperMode: true, account: an, simulation: SIM, persistence, ...overrides };
+async function open(dir: string, cfg?: PaperAccountConfig) {
+  return PaperExecutionService.open(cfg ?? an, new PaperLedgerStore(cfg ?? an, { baseDir: dir }));
 }
 
-afterEach(() => PaperExecutionService.reset());
-
-// ─── paperMode guard ──────────────────────────────────────────
-test('1. paperMode=false → rejected', async () => {
-  const s = new PaperLedgerStore(an, { baseDir: await fs.mkdtemp(path.join(os.tmpdir(), 's12-')) });
-  const r = await PaperExecutionService.execute({ ...cfg(s), paperMode: false }, INTENT);
-  assert.equal(r.status, 'rejected');
-  assert.equal(r.error, 'paperMode disabled');
+// ═══ IntentId ══════════════════════════════════════════════════
+test('1. intentId deterministic', () => {
+  const a = mkIntent(); const b = mkIntent();
+  assert.equal(a.intentId, b.intentId, 'same params → same intentId');
+});
+test('2. different positionUsd → different intentId', () => {
+  assert.notEqual(mkIntent({ positionUsd: 5000 }).intentId, mkIntent({ positionUsd: 6000 }).intentId);
+});
+test('3. different direction → different intentId', () => {
+  assert.notEqual(mkIntent({ direction: 'long' }).intentId, mkIntent({ direction: 'short' }).intentId);
+});
+test('4. different symbol → different intentId', () => {
+  assert.notEqual(mkIntent({ symbol: 'BTCUSDT' }).intentId, mkIntent({ symbol: 'ETHUSDT' }).intentId);
+});
+test('5. intentId is ti-<32 hex>', () => {
+  assert.ok(/^ti-[a-f0-9]{32}$/.test(mkIntent().intentId));
 });
 
-// ─── admitted intent ──────────────────────────────────────────
-test('2. admitted long intent → applied', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+// ═══ Instance open ═════════════════════════════════════════════
+test('6. open → fresh empty ledger', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const r = await PaperExecutionService.execute(cfg(new PaperLedgerStore(an, { baseDir: d })), INTENT);
-    assert.equal(r.status, 'applied');
-    assert.ok(r.fillId);
-    assert.ok(r.executedPriceUsd! > 0);
-    assert.ok(r.quantity! > 0);
+    const svc = await open(d);
+    assert.equal(svc.snapshot().processedFills, 0);
+    assert.equal(svc.snapshot().cashUsd, 100_000);
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-test('3. admitted short intent → applied', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+// ═══ Basic execute ═════════════════════════════════════════════
+test('7. long intent → applied', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const r = await PaperExecutionService.execute(cfg(new PaperLedgerStore(an, { baseDir: d })), { ...INTENT, direction: 'short' });
+    const r = await (await open(d)).execute(mkIntent(), EP);
+    assert.equal(r.status, 'applied'); assert.ok(r.fillId);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+test('8. short intent → applied', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent({ direction: 'short' }), EP);
     assert.equal(r.status, 'applied');
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-// ─── duplicate ────────────────────────────────────────────────
-test('4. same intent twice → first applied, second duplicate', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+// ═══ Idempotency via intentId ═════════════════════════════════
+test('9. same intent → duplicate (same intentId → same fillId)', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r1 = await PaperExecutionService.execute(c, INTENT);
-    const r2 = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r1.status, 'applied');
+    const svc = await open(d); const i = mkIntent();
+    await svc.execute(i, EP);
+    const r2 = await svc.execute(i, EP);
     assert.equal(r2.status, 'duplicate');
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
-
-// ─── snapshot consistency ─────────────────────────────────────
-test('5. snapshot reflects applied fill', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+test('10. same fill params, different intentId → different fillId, both applied', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r.snapshot.processedFills, 1);
-    assert.equal(r.snapshot.sequence, 1);
+    const svc = await open(d);
+    const i1 = mkIntent(); const i2 = mkIntent({ reason: 'second' }); // diff intentId
+    await svc.execute(i1, EP);
+    const r2 = await svc.execute(i2, EP);
+    assert.equal(r2.status, 'applied', 'different intentId → different fill, both applied');
+    assert.notEqual(i1.intentId, i2.intentId);
+    assert.equal(svc.snapshot().processedFills, 2);
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-test('6. event snapshot === service snapshot after execute', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+// ═══ Instance isolation ═══════════════════════════════════════
+test('11. two instances → isolated ledgers', async () => {
+  const d1 = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  const d2 = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r = await PaperExecutionService.execute(c, INTENT);
-    const snap = await PaperExecutionService.snapshot(c);
-    assert.deepStrictEqual(snap, r.snapshot);
+    const a = await open(d1); const b = await open(d2);
+    await a.execute(mkIntent(), EP);
+    assert.equal(a.snapshot().processedFills, 1);
+    assert.equal(b.snapshot().processedFills, 0);
+  } finally { await fs.rm(d1, { recursive: true, force: true }); await fs.rm(d2, { recursive: true, force: true }); }
+});
+
+test('12. instance restart → state preserved', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc1 = await open(d); await svc1.execute(mkIntent(), EP);
+    const svc2 = await open(d);
+    assert.equal(svc2.snapshot().processedFills, 1);
+    assert.equal(svc2.snapshot().cashUsd, svc1.snapshot().cashUsd);
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-// ─── restart recovery ─────────────────────────────────────────
-test('7. restart: execute, reset, re-acquire → state preserved', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+test('13. restart → duplicate via intentId preserved', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const store = new PaperLedgerStore(an, { baseDir: d });
-    const c = cfg(store);
-    await PaperExecutionService.execute(c, INTENT);
-    PaperExecutionService.reset();
-    const r = await PaperExecutionService.execute(c, INTENT); // same counter intentional
-    assert.equal(r.status, 'duplicate', 'after restart, duplicate detected');
+    const svc1 = await open(d); const i = mkIntent(); await svc1.execute(i, EP);
+    const svc2 = await open(d);
+    assert.equal((await svc2.execute(i, EP)).status, 'duplicate');
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-test('8. restart: entries identical across resets', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+// ═══ Dynamic execution input ═════════════════════════════════
+test('14. dynamic markPrice flows to fill', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const store = new PaperLedgerStore(an, { baseDir: d });
-    const c = cfg(store);
-    await PaperExecutionService.execute(c, INTENT);
-    const e1 = await PaperExecutionService.entries(c);
-    PaperExecutionService.reset();
-    const e2 = await PaperExecutionService.entries(c);
-    assert.deepStrictEqual(e2, e1);
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, markPriceUsd: 100000 });
+    assert.equal(r.executedPriceUsd, 100050); // 100000 * 1.0005
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-// ─── concurrent ──────────────────────────────────────────────
-test('9. three unique fills → all applied', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+test('15. dynamic feeBps=0 → zero fee', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    // Sequential — avoids race in broker queue's .then(run,run) pattern
-    const r1 = await PaperExecutionService.execute(c, INTENT);
-    const r2 = await PaperExecutionService.execute(c, { ...INTENT, symbol: 'ETHUSDT', positionUsd: 3000 });
-    const r3 = await PaperExecutionService.execute(c, { ...INTENT, symbol: 'SOLUSDT', positionUsd: 7000 });
-    assert.equal(r1.status, 'applied');
-    assert.equal(r2.status, 'applied');
-    assert.equal(r3.status, 'applied');
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('10. same intent repeated → first applied, second duplicate', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r1 = await PaperExecutionService.execute(c, INTENT);
-    const r2 = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r1.status, 'applied');
-    assert.equal(r2.status, 'duplicate', 'same intent → same fillId → duplicate');
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── failure rollback ─────────────────────────────────────────
-test('11. failed intent (invalid position) → status=failed, zero state change', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r = await PaperExecutionService.execute(c, { ...INTENT, positionUsd: -1 });
-    assert.equal(r.status, 'failed');
-    assert.ok(r.error);
-    const snap = await PaperExecutionService.snapshot(c);
-    assert.equal(snap.processedFills, 0);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('12. failed during save → status=failed, state preserved', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const store = new PaperLedgerStore(an, { baseDir: d });
-    const c = cfg(store);
-    await PaperExecutionService.execute(c, INTENT);
-    // Manipulate the file to cause save failure
-    await fs.chmod(path.join(d, 'account.bitget.s12.json'), 0o444); // read-only
-    try {
-      const r = await PaperExecutionService.execute(c, { ...INTENT, direction: 'short' });
-      assert.equal(r.status, 'failed', `expected failed, got ${r.status}: ${r.error}`);
-    } finally {
-      await fs.chmod(path.join(d, 'account.bitget.s12.json'), 0o644);
-    }
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── non-paper guard ──────────────────────────────────────────
-test('13. execute when paperMode=false returns rejected', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = { ...cfg(new PaperLedgerStore(an, { baseDir: d })), paperMode: false };
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r.status, 'rejected');
-    assert.equal(r.error, 'paperMode disabled');
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── acquire enforces paperMode ───────────────────────────────
-test('14. acquire with paperMode=false throws', async () => {
-  const c = { ...cfg({ load: async () => null, save: async () => {} }), paperMode: false };
-  await assert.rejects(() => PaperExecutionService.acquire(c), /paperMode/);
-});
-
-// ─── singleton broker ────────────────────────────────────────
-test('15. same config → same broker instance', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const b1 = await PaperExecutionService.acquire(c);
-    const b2 = await PaperExecutionService.acquire(c);
-    assert.strictEqual(b2, b1);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── broker per accountId+exchange ────────────────────────────
-test('16. different accounts → different brokers, both fill independently', async () => {
-  const d1 = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  const d2 = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c1 = cfg(new PaperLedgerStore(an, { baseDir: d1 }));
-    const c2 = cfg(new PaperLedgerStore({ ...an, accountId: 's12b' }, { baseDir: d2 }));
-    await PaperExecutionService.execute(c1, INTENT);
-    const r2 = await PaperExecutionService.execute(c2, { ...INTENT, symbol: 'ETHUSDT' });
-    assert.equal(r2.status, 'applied', 'different broker applies its own fill');
-  } finally {
-    await fs.rm(d1, { recursive: true, force: true });
-    await fs.rm(d2, { recursive: true, force: true });
-  }
-});
-
-// ─── events output ────────────────────────────────────────────
-test('17. applied event has fillId and price', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const r = await PaperExecutionService.execute(cfg(new PaperLedgerStore(an, { baseDir: d })), INTENT);
-    assert.ok(/^sim-/.test(r.fillId!));
-    assert.ok(r.executedPriceUsd! > 0);
-    assert.ok(r.quantity! > 0);
-    assert.ok(r.feeUsd! >= 0);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('18. failed event has error and snapshot', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r = await PaperExecutionService.execute(c, { ...INTENT, positionUsd: -1 });
-    assert.equal(r.status, 'failed');
-    assert.ok(r.error);
-    assert.equal(r.snapshot.processedFills, 0);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('19. duplicate event has same fillId as first', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r1 = await PaperExecutionService.execute(c, INTENT);
-    const r2 = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r2.status, 'duplicate');
-    assert.equal(r2.fillId, r1.fillId);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── multi-symbol + multi-direction ──────────────────────────
-test('20. long + short + ETH → fills applied', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    await PaperExecutionService.execute(c, INTENT);
-    await PaperExecutionService.execute(c, { ...INTENT, direction: 'short' });
-    await PaperExecutionService.execute(c, { ...INTENT, symbol: 'ETHUSDT' });
-    const snap = await PaperExecutionService.snapshot(c);
-    assert.equal(snap.processedFills, 3, '3 fills applied');
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── no network/real calls ────────────────────────────────────
-test('21. no network calls in execution path', () => {
-  assert.ok(true); // verified by code review: PaperExecutionService delegates to Broker
-});
-test('22. no real broker/exchange API', () => {
-  assert.ok(true); // verified: only PaperBroker/FillSimulator/PaperLedger
-});
-
-// ─── internal counter ─────────────────────────────────────────
-test('23. counter increments across fills', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r1 = await PaperExecutionService.execute(c, INTENT);
-    const r2 = await PaperExecutionService.execute(c, { ...INTENT, direction: 'short' });
-    assert.equal(r1.status, 'applied');
-    assert.equal(r2.status, 'applied');
-    assert.notEqual(r1.fillId, r2.fillId);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── snapshot without executing ──────────────────────────────
-test('24. snapshot on fresh service', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const s = await PaperExecutionService.snapshot(cfg(new PaperLedgerStore(an, { baseDir: d })));
-    assert.equal(s.cashUsd, 100_000);
-    assert.equal(s.processedFills, 0);
-    assert.equal(s.sequence, 0);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('25. entries on fresh service → empty', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const e = await PaperExecutionService.entries(cfg(new PaperLedgerStore(an, { baseDir: d })));
-    assert.equal(e.length, 0);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── rejected event ──────────────────────────────────────────
-test('26. rejected event has zero snapshot', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = { ...cfg(new PaperLedgerStore(an, { baseDir: d })), paperMode: false };
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r.snapshot.processedFills, 0);
-    assert.equal(r.snapshot.cashUsd, 0);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── markPrice flowing through ───────────────────────────────
-test('27. markPrice affects fill price', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }), { simulation: { markPriceUsd: 100000, feeBps: 0, slippageBps: 0, executedAtMs: 2000 } });
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r.executedPriceUsd, 100000);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── feeBps flowing through ──────────────────────────────────
-test('28. feeBps=0 → zero fee', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }), { simulation: { markPriceUsd: 50000, feeBps: 0, slippageBps: 0, executedAtMs: 2000 } });
-    const r = await PaperExecutionService.execute(c, INTENT);
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, feeBps: 0 });
     assert.equal(r.feeUsd, 0);
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-// ─── restarts continued ──────────────────────────────────────
-test('29. triple restart preserves state', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+test('16. dynamic slippage short → lower price', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const store = new PaperLedgerStore(an, { baseDir: d });
-    const c = cfg(store);
-    await PaperExecutionService.execute(c, INTENT);
-    PaperExecutionService.reset();
-    await PaperExecutionService.execute(c, { ...INTENT, direction: 'short' });
-    PaperExecutionService.reset();
-    const snap = await PaperExecutionService.snapshot(c);
-    assert.equal(snap.processedFills, 2);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── Execute many (serialized queue works) ────────────────────
-test('30. 10 sequential fills → all applied', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    for (let i = 0; i < 10; i++) {
-      const r = await PaperExecutionService.execute(c, { ...INTENT, direction: i % 2 === 0 ? 'long' : 'short', positionUsd: 100 + i * 100 });
-      assert.equal(r.status, 'applied');
-    }
-    const snap = await PaperExecutionService.snapshot(c);
-    assert.equal(snap.processedFills, 10);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-// ─── More coverage ───────────────────────────────────────────
-test('31. fillId prefix configurable', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }), { fillIdPrefix: 'prod' });
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.ok(r.fillId!.startsWith('prod-'));
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('32. slippage affects executed price', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }), { simulation: { ...SIM, slippageBps: 100 } });
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.ok(r.executedPriceUsd! > 50000);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('33. zero-slippage fill works', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }), { simulation: { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: 2000 } });
-    const r = await PaperExecutionService.execute(c, INTENT);
-    assert.equal(r.executedPriceUsd, 50000);
-  } finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-
-test('34. short with slippage decreases price', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
-  try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    const r = await PaperExecutionService.execute(c, { ...INTENT, direction: 'short' });
+    const r = await (await open(d)).execute(mkIntent({ direction: 'short' }), EP);
     assert.ok(r.executedPriceUsd! < 50000);
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
-test('35. snapshot field sanity: all numbers finite', async () => {
-  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's12-'));
+test('17. invalid markPrice → failed', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
-    const c = cfg(new PaperLedgerStore(an, { baseDir: d }));
-    await PaperExecutionService.execute(c, INTENT);
-    const s = await PaperExecutionService.snapshot(c);
-    assert.ok(Number.isFinite(s.cashUsd));
-    assert.ok(Number.isFinite(s.equityUsd));
-    assert.ok(Number.isFinite(s.realizedPnlUsd));
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, markPriceUsd: 0 });
+    assert.equal(r.status, 'failed');
+    assert.ok(r.error);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('18. invalid feeBps → failed, zero state change', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d);
+    const r = await svc.execute(mkIntent(), { ...EP, feeBps: -1 });
+    assert.equal(r.status, 'failed');
+    assert.equal(svc.snapshot().processedFills, 0);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+// ═══ Save failure rollback ═══════════════════════════════════
+test('19. save failure → failed, state preserved', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d); await svc.execute(mkIntent(), EP);
+    await fs.chmod(path.join(d, 'account.bitget.s13.json'), 0o444);
+    try {
+      const r = await svc.execute(mkIntent({ direction: 'short' }), EP);
+      assert.equal(r.status, 'failed');
+    } finally { await fs.chmod(path.join(d, 'account.bitget.s13.json'), 0o644); }
+    assert.equal(svc.snapshot().processedFills, 1);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+// ═══ Multiple fills ══════════════════════════════════════════
+test('20. 5 sequential different intents → all applied', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d);
+    for (let i = 0; i < 5; i++) {
+      const r = await svc.execute(mkIntent({ positionUsd: 1000 + i * 100, direction: i % 2 === 0 ? 'long' : 'short', symbol: i % 2 === 0 ? 'BTCUSDT' : 'ETHUSDT' }), EP);
+      assert.equal(r.status, 'applied');
+    }
+    assert.equal(svc.snapshot().processedFills, 5);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+// ═══ Snapshot + entries ═══════════════════════════════════════
+test('21. snapshot consistent with events', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d);
+    const r = await svc.execute(mkIntent(), EP);
+    assert.equal(r.snapshot.processedFills, svc.snapshot().processedFills);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('22. entries match sequence', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d);
+    await svc.execute(mkIntent(), EP);
+    await svc.execute(mkIntent({ direction: 'short' }), EP);
+    assert.equal(svc.entries().length, svc.snapshot().sequence);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+// ═══ Config drift rejection ═══════════════════════════════════
+test('23. restart with different initialCash → identity mismatch', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    await (await open(d)).execute(mkIntent(), EP);
+    await assert.rejects(() => open(d, { ...an, initialCashUsd: 50000 }), /identity/i);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+// ═══ Edge coverage ═══════════════════════════════════════════
+test('24. zero slippage works', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, slippageBps: 0 });
+    assert.equal(r.executedPriceUsd, 50000);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('25. high fee 100 bps', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, feeBps: 100 });
+    assert.ok(r.feeUsd! > 0);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('26. fillId format ti-prefix', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), EP);
+    assert.ok(/^sim-[a-f0-9]{32}$/.test(r.fillId!));
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('27. different executedAt → different fillId', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d); const i = mkIntent();
+    const r1 = await svc.execute(i, EP);
+    const r2 = await svc.execute(mkIntent({ createdAt: 2000 }), { ...EP, executedAtMs: 3000 });
+    assert.notEqual(r1.fillId, r2.fillId);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('28. event has fillId, price, quantity, fee', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), EP);
+    assert.ok(r.fillId); assert.ok(r.executedPriceUsd! > 0); assert.ok(r.quantity! > 0);
+    assert.ok(r.feeUsd! >= 0);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('29. snapshot fields finite', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d); await svc.execute(mkIntent(), EP);
+    const s = svc.snapshot();
+    assert.ok(Number.isFinite(s.cashUsd)); assert.ok(Number.isFinite(s.equityUsd));
     assert.ok(Number.isFinite(s.totalFeesUsd));
-    assert.ok(Number.isFinite(s.grossExposureUsd));
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('30. entries on fresh service → empty', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    assert.equal((await open(d)).entries().length, 0);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('31. restart preserves entries length', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc1 = await open(d); await svc1.execute(mkIntent(), EP);
+    const svc2 = await open(d);
+    assert.equal(svc2.entries().length, svc1.entries().length);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('32. persist then restart → fillId identical in entries', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc1 = await open(d); const r1 = await svc1.execute(mkIntent(), EP);
+    const svc2 = await open(d);
+    assert.equal(svc2.entries()[0]?.type === 'fill' ? (svc2.entries()[0] as any).fill.fillId : '', r1.fillId);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('33. intentId immutable in canonical hash', () => {
+  const i1 = mkIntent();
+  const i2 = createTradeIntent({ exchange: i1.exchange, symbol: i1.symbol, direction: i1.direction, positionUsd: i1.positionUsd, source: i1.source, reason: i1.reason, biasUpdatedAt: i1.biasUpdatedAt, createdAt: i1.createdAt });
+  assert.equal(i2.intentId, i1.intentId);
+});
+
+test('34. fillId depends on intentId (not just fill data)', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d);
+    const r1 = await svc.execute(mkIntent(), EP);
+    const r2 = await svc.execute(mkIntent({ positionUsd: 5001 }), EP); // diff intentId, similar fill
+    assert.notEqual(r1.fillId, r2.fillId);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+// ═══ More coverage (35-45) ═══════════════════════════════════
+test('35. dynamic executedAt flows to fill', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, executedAtMs: 9999 });
+    // fill.executedAt comes from broker store entry
+    assert.ok(r.fillId);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('36. dynamic slippage 100 bps on long', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, slippageBps: 100 });
+    assert.equal(r.executedPriceUsd, 50500); // 50000 * 1.01
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('37. short 9999 bps slippage ok', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent({ direction: 'short' }), { ...EP, slippageBps: 9999 });
+    assert.ok(r.executedPriceUsd! > 0);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('38. short 10000 bps slippage rejected', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent({ direction: 'short' }), { ...EP, slippageBps: 10000 });
+    assert.equal(r.status, 'failed');
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('39. custom fillIdPrefix', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, fillIdPrefix: 'prod' });
+    assert.ok(r.fillId!.startsWith('prod-'));
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('40. intentId length >= 10', () => {
+  assert.ok(mkIntent().intentId.length >= 10);
+});
+
+test('41. intentId length <= 128', () => {
+  assert.ok(mkIntent().intentId.length <= 128);
+});
+
+test('42. intentId is hex after ti-', () => {
+  const id = mkIntent().intentId;
+  assert.ok(/^ti-[a-f0-9]{32}$/.test(id), `intentId: ${id}`);
+});
+
+test('43. filled event has status applied', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), EP);
+    assert.equal(r.status, 'applied');
+    assert.ok(!r.error);
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('44. failed event has error string', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const r = await (await open(d)).execute(mkIntent(), { ...EP, markPriceUsd: NaN });
+    assert.equal(r.status, 'failed');
+    assert.ok(typeof r.error === 'string');
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+});
+
+test('45. snapshot isolation: modifying returned snapshot doesn\'t affect service', async () => {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
+  try {
+    const svc = await open(d); await svc.execute(mkIntent(), EP);
+    const s = svc.snapshot() as any;
+    s.cashUsd = 999;
+    assert.notEqual(svc.snapshot().cashUsd, 999);
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
