@@ -154,18 +154,15 @@ test('9. persisted cash correct', async () => {
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
-// ─── Save failure recovery ───────────────────────────────────
-test('10. save failure → reload shows old state', async () => {
+// ─── Missing file: fresh boot vs runtime loss ─────────────
+test('10. missing file on fresh boot → clean new ledger', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'e2e-'));
   try {
     const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
-    const b1 = await PaperBroker.open(CONFIG, store);
-    await b1.execute(INTENT_LONG, SCFG, 13);
-    // Delete the file to simulate corruption for next save
-    await fs.unlink(path.join(dir, 'account.bitget.e2e01.json'));
-    // Try to execute with a corrupt state — broker won't find file on next open
-    const b2 = await PaperBroker.open(CONFIG, store);
-    assert.equal(b2.snapshot().processedFills, 0, 'new ledger when file was deleted');
+    // No file has ever been saved to this dir → this is a fresh first boot
+    const b = await PaperBroker.open(CONFIG, store);
+    assert.equal(b.snapshot().processedFills, 0, 'fresh boot creates empty ledger');
+    assert.equal(b.snapshot().cashUsd, CONFIG.initialCashUsd);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
 
@@ -444,5 +441,108 @@ test('30. identity check on real store open', async () => {
     // Open with fixed canonical config — same CONFIG works since base config is already canonical
     const b = await PaperBroker.open(CONFIG, store);
     assert.equal(b.snapshot().processedFills, 1);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+// ═══ R1: Independent replay + real save failure ═══
+
+test('R1-INDEPENDENT: two separate dirs, identical sequence → identical everywhere', async () => {
+  const dir1 = await fs.mkdtemp(path.join(os.tmpdir(), 'e2e-'));
+  const dir2 = await fs.mkdtemp(path.join(os.tmpdir(), 'e2e-'));
+  try {
+    // Run identical sequences in two completely separate directories
+    const s1 = new PaperLedgerStore(CONFIG, { baseDir: dir1 });
+    const s2 = new PaperLedgerStore(CONFIG, { baseDir: dir2 });
+    const b1 = await PaperBroker.open(CONFIG, s1);
+    const b2 = await PaperBroker.open(CONFIG, s2);
+    await b1.execute(INTENT_LONG, SCFG, 50);
+    await b2.execute(INTENT_LONG, SCFG, 50);
+    await b1.execute(INTENT_SHORT, SCFG, 51);
+    await b2.execute(INTENT_SHORT, SCFG, 51);
+    await b1.execute({ ...INTENT_LONG, symbol: 'ETHUSDT' }, SCFG, 52);
+    await b2.execute({ ...INTENT_LONG, symbol: 'ETHUSDT' }, SCFG, 52);
+
+    // Verify: entries identical
+    assert.deepStrictEqual(b2.entries(), b1.entries(), 'entries identical');
+    // Verify: snapshot identical
+    assert.deepStrictEqual(b2.snapshot(), b1.snapshot(), 'snapshot identical');
+    // Verify: digest identical
+    assert.equal(digest(b2.entries(), b2.snapshot()), digest(b1.entries(), b1.snapshot()), 'digest identical');
+    // Verify: persisted canonical JSON identical
+    const json1 = await fs.readFile(path.join(dir1, 'account.bitget.e2e01.json'), 'utf-8');
+    const json2 = await fs.readFile(path.join(dir2, 'account.bitget.e2e01.json'), 'utf-8');
+    assert.equal(json2, json1, 'persisted JSON identical');
+    // Verify: restart from both yields same state
+    const b1r = await PaperBroker.open(CONFIG, s1);
+    const b2r = await PaperBroker.open(CONFIG, s2);
+    assert.deepStrictEqual(b2r.snapshot(), b1r.snapshot(), 'restart snapshot identical');
+  } finally {
+    await fs.rm(dir1, { recursive: true, force: true });
+    await fs.rm(dir2, { recursive: true, force: true });
+  }
+});
+
+test('R1-FAULT-SAVE: FaultInjecting save failure → broker state unchanged, disk unchanged', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'e2e-'));
+  try {
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    const b = await PaperBroker.open(CONFIG, store);
+    // First execute succeeds — state persisted
+    await b.execute(INTENT_LONG, SCFG, 60);
+    const snapshotBefore = b.snapshot();
+    const jsonBefore = await fs.readFile(path.join(dir, 'account.bitget.e2e01.json'), 'utf-8');
+
+    // Wrap store to inject failure on next save
+    let failNext = true;
+    const faulty: PaperLedgerStore = Object.create(store) as PaperLedgerStore;
+    faulty.save = async (l: any) => {
+      if (failNext) { failNext = false; throw new Error('injected save failure'); }
+      return store.save(l);
+    };
+    faulty.load = () => store.load();
+
+    const b2 = await PaperBroker.open(CONFIG, faulty);
+
+    // Attempt a fill — save will fail
+    try { await b2.execute(INTENT_SHORT, SCFG, 61); } catch {}
+
+    // Broker state must be unchanged
+    assert.deepStrictEqual(b2.snapshot(), snapshotBefore, 'broker state unchanged after save failure');
+    // Disk state must be unchanged
+    const jsonAfter = await fs.readFile(path.join(dir, 'account.bitget.e2e01.json'), 'utf-8');
+    assert.equal(jsonAfter, jsonBefore, 'disk state unchanged after save failure');
+
+    // Subsequent execute should succeed (queue not poisoned)
+    failNext = false;
+    const r3 = await b2.execute(INTENT_SHORT, SCFG, 62);
+    assert.equal(r3.status, 'applied', 'subsequent execute succeeds');
+    assert.ok(b2.snapshot().processedFills > snapshotBefore.processedFills, 'state advanced');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('R1-FAULT-RECOVERY: restart after save failure → recovers previous state', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'e2e-'));
+  try {
+    const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    const b = await PaperBroker.open(CONFIG, store);
+    await b.execute(INTENT_LONG, SCFG, 70);
+    const before = b.snapshot().processedFills;
+
+    // Inject save failure via wrapped persistence
+    let fail = true;
+    const faulty: PaperLedgerStore = Object.create(store) as PaperLedgerStore;
+    faulty.save = async (l: any) => { if (fail) { fail = false; throw new Error('injected'); } return store.save(l); };
+    faulty.load = () => store.load();
+    const b2 = await PaperBroker.open(CONFIG, faulty);
+    try { await b2.execute(INTENT_SHORT, SCFG, 71); } catch {}
+
+    // Restart with clean store → recovers previous state
+    const cleanStore = new PaperLedgerStore(CONFIG, { baseDir: dir });
+    const b3 = await PaperBroker.open(CONFIG, cleanStore);
+    assert.equal(b3.snapshot().processedFills, before, 'restart recovers state before failed save');
+    // Queue on b3 works after recovery
+    const r = await b3.execute(INTENT_SHORT, SCFG, 72);
+    assert.equal(r.status, 'applied');
+    assert.equal(b3.snapshot().processedFills, before + 1);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
