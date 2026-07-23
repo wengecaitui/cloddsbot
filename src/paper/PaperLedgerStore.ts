@@ -86,15 +86,21 @@ export class PaperLedgerStore {
       if (doc.version !== 1) throw new UnsupportedPaperLedgerVersionError(`Version: ${doc?.version ?? 'missing'}`);
       const config = doc.config;
       if (!config || typeof config !== 'object') throw new PaperLedgerCorruptionError('Missing config');
-      // Validate config
-      validatePaperAccountConfig(config);
+      // Validate config — wrap any validation error as corruption
+      try { validatePaperAccountConfig(config); } catch (e) {
+        throw new PaperLedgerCorruptionError(`persisted config invalid: ${(e as Error).message}`);
+      }
       if (config.exchange !== this.config.exchange) throw new PaperLedgerIdentityMismatchError('Exchange mismatch on load');
       if (config.accountId !== this.config.accountId) throw new PaperLedgerIdentityMismatchError('AccountId mismatch on load');
       if (roundUsd(config.initialCashUsd) !== this.canonicalCash) throw new PaperLedgerIdentityMismatchError('initialCash mismatch on load');
       // R1: entries must be an array
       if (!doc.entries || !Array.isArray(doc.entries)) throw new PaperLedgerCorruptionError('entries must be an array');
       const entries: PaperLedgerEntry[] = doc.entries;
-      return PaperAccountLedger.fromEntries(this.config, entries);
+      // R2: wrap replay errors as corruption
+      try { return PaperAccountLedger.fromEntries(this.config, entries); } catch (e) {
+        if (e instanceof PaperLedgerCorruptionError) throw e;
+        throw new PaperLedgerCorruptionError(`load replay failed: ${(e as Error).message}`);
+      }
     } catch (e: any) {
       if (e.code === 'ENOENT') return null;
       throw e;
