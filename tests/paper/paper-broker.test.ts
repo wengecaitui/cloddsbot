@@ -5,11 +5,14 @@ import { PaperBroker, type PaperBrokerPersistence } from '../../src/paper/PaperB
 import { PaperAccountLedger } from '../../src/paper/PaperAccountLedger';
 import type { PaperAccountConfig } from '../../src/types/paper-account';
 import type { FillSimulatorConfig } from '../../src/paper/FillSimulator';
-import type { TradeIntent } from '../../src/types/trade-intent';
+import { createTradeIntent, type TradeIntent } from '../../src/types/trade-intent';
 import { PaperLedgerIdentityMismatchError, PaperLedgerCorruptionError } from '../../src/paper/errors';
 
 const CONFIG: PaperAccountConfig = { accountId: 'brk01', exchange: 'bitget', initialCashUsd: 100_000 };
-const INTENT: TradeIntent = { exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 1500, orderType: 'market', source: 's', createdAt: 1000, reason: 'r', biasUpdatedAt: 1000 };
+const INTENT: TradeIntent = createTradeIntent({
+  exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 1500,
+  source: 's', reason: 'r', biasUpdatedAt: 1000, createdAt: 1000,
+});
 const SCFG: FillSimulatorConfig = { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 };
 
 class FakeStore implements PaperBrokerPersistence {

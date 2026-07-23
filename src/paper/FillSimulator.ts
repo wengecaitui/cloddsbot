@@ -28,17 +28,15 @@ export interface SimulateResult {
 }
 
 /** R2: SHA-256 deterministic fillId based on canonical fill fields. */
+/** R4/S13: fillId binds intentId + canonical fill data. */
 function computeFillId(
-  exchange: ExchangeId, symbol: string, side: 'buy' | 'sell',
+  intentId: string, exchange: ExchangeId, symbol: string, side: 'buy' | 'sell',
   quantity: number, priceUsd: number, feeUsd: number, executedAt: number,
-  _counter: number, prefix: string,
+  prefix: string,
 ): string {
   if (typeof prefix !== 'string' || !PREFIX_RE.test(prefix))
     throw new Error(`FillSimulator: fillIdPrefix must match /^[A-Za-z0-9_-]{1,32}$/, got ${JSON.stringify(prefix)}`);
-  // R4: canonical fill identity — hash canonical fill data only, NOT counter.
-  // Same fill = same ID regardless of counter. Counter only used for disambiguation
-  // in PaperExecutionService's internal tracking, not in ID.
-  const canonical = `${exchange}|${symbol}|${side}|${quantity}|${priceUsd}|${feeUsd}|${executedAt}`;
+  const canonical = `${intentId}|${exchange}|${symbol}|${side}|${quantity}|${priceUsd}|${feeUsd}|${executedAt}`;
   const digest = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
   const id = `${prefix}-${digest}`;
   if (id.length > MAX_FILLID_LEN)
@@ -97,7 +95,7 @@ export function simulateFill(intent: TradeIntent, config: FillSimulatorConfig, c
 
   const side = isBuy ? 'buy' as const : 'sell' as const;
   const prefix = config.fillIdPrefix ?? DEFAULT_PREFIX;
-  const fillId = computeFillId(intent.exchange, intent.symbol, side, quantity, executedPriceUsd, feeUsd, config.executedAtMs, counter, prefix);
+  const fillId = computeFillId(intent.intentId, intent.exchange, intent.symbol, side, quantity, executedPriceUsd, feeUsd, config.executedAtMs, prefix);
   const fill: PaperFill = { fillId, exchange: intent.exchange, symbol: intent.symbol, side, quantity, priceUsd: executedPriceUsd, feeUsd, executedAt: config.executedAtMs };
   validatePaperFill(fill);
   return { fill, executedPriceUsd, quantity, executedNotionalUsd, feeUsd };

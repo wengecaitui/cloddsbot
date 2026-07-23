@@ -3,13 +3,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { simulateFill } from '../../src/paper/FillSimulator';
 import { PaperAccountLedger } from '../../src/paper/PaperAccountLedger';
-import type { TradeIntent } from '../../src/types/trade-intent';
+import { createTradeIntent, type TradeIntent } from '../../src/types/trade-intent';
 
-const BASE_INTENT: TradeIntent = {
+const BASE_INTENT: TradeIntent = createTradeIntent({
   exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long',
-  positionUsd: 1500, orderType: 'market',
-  source: 'spread', createdAt: 1000, reason: 'test', biasUpdatedAt: 1000,
-};
+  positionUsd: 1500, source: 's', reason: 'r', biasUpdatedAt: 1000, createdAt: 1000,
+});
 const CFG = { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 };
 function f(c: number) { return simulateFill(BASE_INTENT, CFG, c); }
 
