@@ -1,8 +1,5 @@
-// Stage 3B4C9-R1: Hardened deterministic fill simulator.
-//
-// Full input validation, canonical hashed fillId, post-round verification,
-// fee on executed notional, integration-safe output.
-
+// Stage 3B4C9-R2: SHA-256 deterministic fill ID based on canonical fill data.
+import * as crypto from 'crypto';
 import type { ExchangeId } from '../data/MarketIdentity';
 import { isExchangeId } from '../data/MarketIdentity';
 import type { TradeIntent } from '../types/trade-intent';
@@ -20,7 +17,7 @@ export interface FillSimulatorConfig {
 
 const DEFAULT_PREFIX = 'sim';
 const MAX_FILLID_LEN = 128;
-const FILLID_MIN_LEN = 8;
+const PREFIX_RE = /^[A-Za-z0-9_-]{1,32}$/;
 
 export interface SimulateResult {
   fill: PaperFill;
@@ -30,21 +27,19 @@ export interface SimulateResult {
   feeUsd: number;
 }
 
-/** R1: deterministic hash for fillId. Uses canonical components. */
-function hashFillId(intent: TradeIntent, config: FillSimulatorConfig, counter: number): string {
-  const key = `${intent.symbol}|${intent.direction}|${config.executedAtMs}|${counter}`;
-  // Simple deterministic hash — sum of char codes mod 36^6, produces ~6-char hex-like suffix
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = ((hash << 5) - hash + key.charCodeAt(i)) | 0;
-  const suffix = Math.abs(hash).toString(36).slice(0, 6).padStart(6, '0');
-  const prefix = config.fillIdPrefix ?? DEFAULT_PREFIX;
-  const id = `${prefix}-${intent.symbol}-${counter}-${suffix}`;
-  if (id.length > MAX_FILLID_LEN) {
-    throw new Error(`FillSimulator: fillId too long (${id.length} > ${MAX_FILLID_LEN}): ${id}`);
-  }
-  if (id.length < FILLID_MIN_LEN) {
-    throw new Error(`FillSimulator: fillId too short (${id.length} < ${FILLID_MIN_LEN}): ${id}`);
-  }
+/** R2: SHA-256 deterministic fillId based on canonical fill fields. */
+function computeFillId(
+  exchange: ExchangeId, symbol: string, side: 'buy' | 'sell',
+  quantity: number, priceUsd: number, feeUsd: number, executedAt: number,
+  counter: number, prefix: string,
+): string {
+  if (typeof prefix !== 'string' || !PREFIX_RE.test(prefix))
+    throw new Error(`FillSimulator: fillIdPrefix must match /^[A-Za-z0-9_-]{1,32}$/, got ${JSON.stringify(prefix)}`);
+  const canonical = `${exchange}|${symbol}|${side}|${quantity}|${priceUsd}|${feeUsd}|${executedAt}|${counter}`;
+  const digest = crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+  const id = `${prefix}-${digest}`;
+  if (id.length > MAX_FILLID_LEN)
+    throw new Error(`FillSimulator: fillId too long (${id.length} > ${MAX_FILLID_LEN})`);
   return id;
 }
 
@@ -70,8 +65,6 @@ function validateConfig(config: FillSimulatorConfig, direction: string): void {
     throw new Error('FillSimulator: slippageBps must be finite non-negative');
   if (!Number.isInteger(config.executedAtMs) || config.executedAtMs < 0)
     throw new Error('FillSimulator: executedAtMs must be non-negative integer');
-  if (config.executedAtMs < 0)
-    throw new Error('FillSimulator: executedAtMs must be >= 0');
   if (direction === 'short' && config.slippageBps >= 10_000)
     throw new Error(`FillSimulator: short slippageBps=${config.slippageBps} must be < 10000 (would zero or negate price)`);
 }
@@ -99,12 +92,10 @@ export function simulateFill(intent: TradeIntent, config: FillSimulatorConfig, c
   if (!Number.isFinite(feeUsd) || feeUsd < 0)
     throw new Error(`FillSimulator: feeUsd=${feeUsd} after rounding`);
 
-  const fillId = hashFillId(intent, config, counter);
-  const fill: PaperFill = {
-    fillId, exchange: intent.exchange, symbol: intent.symbol,
-    side: isBuy ? 'buy' : 'sell', quantity, priceUsd: executedPriceUsd,
-    feeUsd, executedAt: config.executedAtMs,
-  };
+  const side = isBuy ? 'buy' as const : 'sell' as const;
+  const prefix = config.fillIdPrefix ?? DEFAULT_PREFIX;
+  const fillId = computeFillId(intent.exchange, intent.symbol, side, quantity, executedPriceUsd, feeUsd, config.executedAtMs, counter, prefix);
+  const fill: PaperFill = { fillId, exchange: intent.exchange, symbol: intent.symbol, side, quantity, priceUsd: executedPriceUsd, feeUsd, executedAt: config.executedAtMs };
   validatePaperFill(fill);
   return { fill, executedPriceUsd, quantity, executedNotionalUsd, feeUsd };
 }

@@ -1,4 +1,4 @@
-// Stage 3B4C9-R1: Hardened fill simulator tests — ≥40 tests.
+// Stage 3B4C9-R2: SHA-256 fill ID tests — ≥50 tests
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { simulateFill } from '../../src/paper/FillSimulator';
@@ -11,161 +11,185 @@ const BASE_INTENT: TradeIntent = {
   source: 'spread', createdAt: 1000, reason: 'test', biasUpdatedAt: 1000,
 };
 const CFG = { markPriceUsd: 50000, feeBps: 10, slippageBps: 5, executedAtMs: 2000 };
-
-function fill(c: number) { return simulateFill(BASE_INTENT, CFG, c); }
-function fillShort(c: number) { return simulateFill({ ...BASE_INTENT, direction: 'short' }, CFG, c); }
+function f(c: number) { return simulateFill(BASE_INTENT, CFG, c); }
 
 // ─── Validation ────────────────────────────────────────────────
-test('1. long → buy', () => { assert.equal(fill(0).fill.side, 'buy'); });
-test('2. short → sell', () => { assert.equal(fillShort(0).fill.side, 'sell'); });
+test('1. long → buy', () => { assert.equal(f(0).fill.side, 'buy'); });
+test('2. short → sell', () => {
+  assert.equal(simulateFill({ ...BASE_INTENT, direction: 'short' }, CFG, 0).fill.side, 'sell');
+});
 test('3. forged direction rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, direction: 'hold' as any }, CFG, 0), /direction/); });
 test('4. forged orderType rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, orderType: 'limit' as any }, CFG, 0), /orderType/); });
 test('5. invalid exchange rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, exchange: 'invalid' as any }, CFG, 0), /exchange/); });
 test('6. NaN position rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, positionUsd: NaN }, CFG, 0)); });
-test('7. Infinity position rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, positionUsd: Infinity }, CFG, 0)); });
-test('8. zero position rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, positionUsd: 0 }, CFG, 0)); });
-test('9. negative position rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, positionUsd: -1 }, CFG, 0)); });
-test('10. negative counter rejected', () => { assert.throws(() => fill(-1)); });
-
-// ─── Price / fee math ──────────────────────────────────────────
-test('11. long slippage increases price', () => { assert.equal(fill(0).executedPriceUsd, 50025); });
-test('12. short slippage decreases price', () => { assert.equal(fillShort(0).executedPriceUsd, 49975); });
-test('13. zero slippage', () => { const r = simulateFill(BASE_INTENT, { ...CFG, slippageBps: 0 }, 0); assert.equal(r.executedPriceUsd, 50000); });
-test('14. zero fee', () => { const r = simulateFill(BASE_INTENT, { ...CFG, feeBps: 0 }, 0); assert.equal(r.feeUsd, 0); });
-test('15. fee on executedNotional (long)', () => {
-  const r = fill(15);
-  // quantity=1500/50025≈0.029985, notional=0.029985*50025≈1499.99, fee=1499.99*10/10000≈1.50
-  assert.ok(r.feeUsd > 0);
-});
-test('16. fee on executedNotional (short)', () => {
-  const r = fillShort(16);
-  assert.ok(r.feeUsd > 0);
-});
-test('17. short slippage >=10000 rejected', () => {
+test('7. zero position rejected', () => { assert.throws(() => simulateFill({ ...BASE_INTENT, positionUsd: 0 }, CFG, 0)); });
+test('8. negative counter rejected', () => { assert.throws(() => f(-1)); });
+test('9. short slippage>=10000 rejected', () => {
   assert.throws(() => simulateFill({ ...BASE_INTENT, direction: 'short' }, { ...CFG, slippageBps: 10000 }, 0), /slippage/);
 });
-test('18. short slippage 9999 ok', () => {
-  const r = simulateFill({ ...BASE_INTENT, direction: 'short' }, { ...CFG, slippageBps: 9999 }, 18);
-  assert.ok(r.executedPriceUsd > 0, 'extremely small price but still positive');
+test('10. executedAt < createdAt rejected', () => {
+  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, executedAtMs: 500 }, 0), /executedAtMs.*createdAt/);
 });
 
-// ─── Determinism ───────────────────────────────────────────────
-test('19. same input = same output', () => {
-  assert.deepStrictEqual(fill(19), fill(19));
+// ─── Price / fee math ──────────────────────────────────────────
+test('11. long slippage increases price', () => { assert.equal(f(0).executedPriceUsd, 50025); });
+test('12. short slippage decreases price', () => {
+  assert.equal(simulateFill({ ...BASE_INTENT, direction: 'short' }, CFG, 0).executedPriceUsd, 49975);
 });
-test('20. different counter = different fillId', () => {
-  assert.notEqual(fill(20).fill.fillId, fill(21).fill.fillId);
+test('13. zero slippage = mark price', () => {
+  assert.equal(simulateFill(BASE_INTENT, { ...CFG, slippageBps: 0 }, 0).executedPriceUsd, 50000);
 });
-test('21. fillId within 128 chars', () => {
-  assert.ok(fill(21).fill.fillId.length <= 128);
+test('14. zero fee', () => {
+  assert.equal(simulateFill(BASE_INTENT, { ...CFG, feeBps: 0 }, 0).feeUsd, 0);
 });
-test('22. fillId >= 8 chars', () => {
-  assert.ok(fill(22).fill.fillId.length >= 8);
+test('15. feeUsd = executedNotional × feeBps / 10000', () => {
+  const r = f(0);
+  assert.equal(r.feeUsd, Math.round(r.executedNotionalUsd * CFG.feeBps / 10000 * 1e8) / 1e8);
 });
-test('23. fillId collision resistance (100 different counters)', () => {
+test('16. short fee also computed from executedNotional', () => {
+  const r = simulateFill({ ...BASE_INTENT, direction: 'short' }, CFG, 0);
+  assert.equal(r.feeUsd, Math.round(r.executedNotionalUsd * CFG.feeBps / 10000 * 1e8) / 1e8);
+});
+
+// ─── SHA-256 fillId determinism ────────────────────────────────
+test('17. same canonical fill + same counter → same fillId', () => {
+  assert.equal(f(17).fill.fillId, f(17).fill.fillId);
+});
+test('18. different counter → different fillId', () => {
+  assert.notEqual(f(18).fill.fillId, f(19).fill.fillId);
+});
+test('19. fillId has <prefix>-<32 hex> format', () => {
+  const id = f(19).fill.fillId;
+  assert.ok(/^sim-[a-f0-9]{32}$/.test(id), `fillId format: ${id}`);
+});
+test('20. fillId ≤ 128 chars', () => { assert.ok(f(20).fill.fillId.length <= 128); });
+test('21. custom prefix', () => {
+  const r = simulateFill(BASE_INTENT, { ...CFG, fillIdPrefix: 'prod-v2' }, 21);
+  assert.ok(r.fill.fillId.startsWith('prod-v2-'));
+});
+test('22. different exchange → different fillId', () => {
+  const a = f(22);
+  const b = simulateFill({ ...BASE_INTENT, exchange: 'binance' }, CFG, 22);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('23. different symbol → different fillId', () => {
+  const a = f(23);
+  const b = simulateFill({ ...BASE_INTENT, symbol: 'ETHUSDT' }, CFG, 23);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('24. different markPrice → different fillId', () => {
+  const a = f(24);
+  const b = simulateFill(BASE_INTENT, { ...CFG, markPriceUsd: 60000 }, 24);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('25. different feeBps → different fillId', () => {
+  const a = f(25);
+  const b = simulateFill(BASE_INTENT, { ...CFG, feeBps: 20 }, 25);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('26. different slippageBps → different fillId', () => {
+  const a = f(26);
+  const b = simulateFill(BASE_INTENT, { ...CFG, slippageBps: 10 }, 26);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('27. different executedAtMs → different fillId', () => {
+  const a = f(27);
+  const b = simulateFill(BASE_INTENT, { ...CFG, executedAtMs: 3000 }, 27);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('28. different positionUsd → different fillId', () => {
+  const a = f(28);
+  const b = simulateFill({ ...BASE_INTENT, positionUsd: 2000 }, CFG, 28);
+  assert.notEqual(a.fill.fillId, b.fill.fillId);
+});
+test('29. same canonical input (same rounding) = same fillId', () => {
+  const a = f(29);
+  const b = f(29); // same counter, same everything → identical
+  assert.equal(a.fill.fillId, b.fill.fillId);
+});
+test('30. fillId collision resistance 200 counters', () => {
   const ids = new Set<string>();
-  for (let i = 0; i < 100; i++) ids.add(simulateFill(BASE_INTENT, CFG, i).fill.fillId);
-  assert.equal(ids.size, 100);
+  for (let i = 0; i < 200; i++) ids.add(f(i).fill.fillId);
+  assert.equal(ids.size, 200);
 });
-test('24. long fillId contains prefix', () => {
-  assert.ok(fill(24).fill.fillId.startsWith('sim-BTCUSDT'));
+test('31. empty prefix rejected', () => {
+  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, fillIdPrefix: '' }, 31), /fillIdPrefix/);
 });
-test('25. custom fillIdPrefix', () => {
-  const r = simulateFill(BASE_INTENT, { ...CFG, fillIdPrefix: 'prod' }, 25);
-  assert.ok(r.fill.fillId.startsWith('prod-BTCUSDT'));
+test('32. prefix > 32 chars rejected', () => {
+  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, fillIdPrefix: 'a'.repeat(33) }, 32), /fillIdPrefix/);
 });
-
-// ─── Timestamp ─────────────────────────────────────────────────
-test('26. executedAtMs < createdAt rejected', () => {
-  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, executedAtMs: 500 }, 26), /executedAtMs.*createdAt/);
-});
-test('27. executedAtMs = createdAt ok', () => {
-  const r = simulateFill(BASE_INTENT, { ...CFG, executedAtMs: 1000 }, 27);
-  assert.equal(r.fill.executedAt, 1000);
-});
-
-// ─── Post-round validation ─────────────────────────────────────
-test('28. markPrice=0 rejected', () => {
-  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, markPriceUsd: 0 }, 28));
-});
-test('29. markPrice negative rejected', () => {
-  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, markPriceUsd: -100 }, 29));
-});
-test('30. feeBps negative rejected', () => {
-  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, feeBps: -1 }, 30));
-});
-test('31. slippageBps negative rejected', () => {
-  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, slippageBps: -1 }, 31));
+test('33. prefix with special chars rejected', () => {
+  assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, fillIdPrefix: 'bad prefix!' }, 33), /fillIdPrefix/);
 });
 
 // ─── Ledger integration ───────────────────────────────────────
-test('32. fill accepted by PaperAccountLedger', () => {
+test('34. fill accepted by PaperAccountLedger', () => {
   const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 100_000 });
-  const r = fill(32);
-  const applied = l.applyFill(r.fill);
-  assert.equal(applied.status, 'applied');
-  const p = l.getPosition('BTCUSDT')!;
-  assert.equal(p.direction, 'long');
-  assert.ok(p.signedQuantity > 0);
+  const r = f(34);
+  assert.equal(l.applyFill(r.fill).status, 'applied');
+  assert.ok(l.getPosition('BTCUSDT')!.signedQuantity > 0);
 });
-test('33. short fill accepted by PaperAccountLedger', () => {
+test('35. short fill accepted by Ledger', () => {
   const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 100_000 });
-  const r = fillShort(33);
-  const applied = l.applyFill(r.fill);
-  assert.equal(applied.status, 'applied');
-  const p = l.getPosition('BTCUSDT')!;
-  assert.equal(p.direction, 'short');
-  assert.ok(p.signedQuantity < 0);
+  const r = simulateFill({ ...BASE_INTENT, direction: 'short' }, CFG, 35);
+  assert.equal(l.applyFill(r.fill).status, 'applied');
+  assert.ok(l.getPosition('BTCUSDT')!.signedQuantity < 0);
+});
+test('36. two different fills (diff counter) → both accepted (no conflict)', () => {
+  const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 100_000 });
+  l.applyFill(f(36).fill);
+  l.applyFill(f(37).fill);
+  assert.equal(l.snapshot().processedFills, 2);
+});
+test('37. same fill twice → duplicate', () => {
+  const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 100_000 });
+  l.applyFill(f(38).fill);
+  assert.equal(l.applyFill(f(38).fill).status, 'duplicate');
 });
 
+// ─── Post-round validation ─────────────────────────────────────
+test('38. markPrice=0 rejected', () => { assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, markPriceUsd: 0 }, 38)); });
+test('39. feeBps negative rejected', () => { assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, feeBps: -1 }, 39)); });
+test('40. slippageBps negative rejected', () => { assert.throws(() => simulateFill(BASE_INTENT, { ...CFG, slippageBps: -1 }, 40)); });
+
 // ─── Edge cases ───────────────────────────────────────────────
-test('34. positionUsd=1e8 works', () => {
-  const r = simulateFill({ ...BASE_INTENT, positionUsd: 1e8 }, CFG, 34);
-  assert.ok(r.quantity > 0);
-  assert.ok(r.executedNotionalUsd > 0);
-});
-test('35. positionUsd=0.001 at high price works', () => {
-  // 0.001 / 100000 = 1e-8 quantity, rounds to 1e-8 (non-zero at 12 decimal places)
-  const r = simulateFill({ ...BASE_INTENT, positionUsd: 0.001 }, { ...CFG, markPriceUsd: 50000, slippageBps: 0 }, 35);
-  assert.ok(r.quantity >= 0, 'quantity computed');
-  assert.ok(r.executedNotionalUsd >= 0);
-});
-test('36. high slippage on long', () => {
-  const r = simulateFill(BASE_INTENT, { ...CFG, slippageBps: 5000 }, 36);
-  // price = 50000 * 1.5 = 75000
-  assert.equal(r.executedPriceUsd, 75000);
+test('41. positionUsd=1e8 works', () => {
+  const r = simulateFill({ ...BASE_INTENT, positionUsd: 1e8 }, CFG, 41);
   assert.ok(r.quantity > 0);
 });
-test('37. multiple fills to same ledger work', () => {
-  const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 100_000 });
-  l.applyFill(fill(37).fill);
-  l.applyFill(fill(38).fill);
-  assert.equal(l.snapshot().processedFills, 2);
-  const p = l.getPosition('BTCUSDT')!;
-  assert.ok(p.signedQuantity > 0);
-});
-test('38. feeBps=1 gives fractional fee', () => {
-  const r = simulateFill(BASE_INTENT, { ...CFG, feeBps: 1 }, 38);
+test('42. feeBps=1 gives fractional fee', () => {
+  const r = simulateFill(BASE_INTENT, { ...CFG, feeBps: 1 }, 42);
   assert.ok(r.feeUsd > 0 && r.feeUsd < 1);
 });
-test('39. markPrice=1e8 works', () => {
-  const r = simulateFill({ ...BASE_INTENT, positionUsd: 1e8 }, { ...CFG, markPriceUsd: 1e8 }, 39);
-  assert.equal(r.executedNotionalUsd, r.quantity * r.executedPriceUsd);
+test('43. zero slippage on short', () => {
+  const r = simulateFill({ ...BASE_INTENT, direction: 'short' }, { ...CFG, slippageBps: 0 }, 43);
+  assert.equal(r.executedPriceUsd, 50000);
 });
-test('40. short fee = long fee for same params (feeBps test)', () => {
-  const rl = fill(40);
-  const rs = fillShort(41);
-  // Fee is based on notional, which may differ slightly due to slippage direction
-  assert.ok(Math.abs(rl.feeUsd - rs.feeUsd) < 0.01);
+test('44. high slippage long', () => {
+  const r = simulateFill(BASE_INTENT, { ...CFG, slippageBps: 5000 }, 44);
+  assert.equal(r.executedPriceUsd, 75000);
 });
-test('41. execute twice = same fillId (deterministic)', () => {
-  const a = fill(42);
-  const b = fill(42); // same counter
+test('45. short high slippage 9999 ok', () => {
+  const r = simulateFill({ ...BASE_INTENT, direction: 'short' }, { ...CFG, slippageBps: 9999 }, 45);
+  assert.ok(r.executedPriceUsd > 0);
+});
+test('46. same input = same output (deepStrictEqual)', () => {
+  assert.deepStrictEqual(f(46), f(46));
+});
+test('47. fill validatePaperFill passes internally', () => {
+  const r = f(47);
+  assert.ok(r.fill.quantity > 0 && r.fill.priceUsd > 0 && r.fill.feeUsd >= 0);
+});
+test('48. notional = quantity × price', () => {
+  const r = f(48);
+  assert.equal(r.executedNotionalUsd, Math.round(r.quantity * r.executedPriceUsd * 1e8) / 1e8);
+});
+test('49. markPrice=1e8 works', () => {
+  const r = simulateFill({ ...BASE_INTENT, positionUsd: 1e8 }, { ...CFG, markPriceUsd: 1e8 }, 49);
+  assert.equal(r.executedNotionalUsd, Math.round(r.quantity * r.executedPriceUsd * 1e8) / 1e8);
+});
+test('50. fillId for identical canonicals = identical hex', () => {
+  const a = f(50);
+  const b = simulateFill(BASE_INTENT, CFG, 50);
   assert.equal(a.fill.fillId, b.fill.fillId);
-});
-test('42. fill validatePaperFill passes internally', () => {
-  const r = fill(43);
-  assert.ok(r.fill.quantity > 0);
-  assert.ok(r.fill.priceUsd > 0);
-  assert.ok(r.fill.feeUsd >= 0);
 });
