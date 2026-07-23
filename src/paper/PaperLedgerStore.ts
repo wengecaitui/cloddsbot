@@ -2,7 +2,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { PaperAccountConfig, PaperLedgerEntry, PaperLedgerDocumentV1 } from '../types/paper-account';
-import { validatePaperAccountConfig } from '../types/paper-account';
+import { validatePaperAccountConfig, canonicalizePaperAccountConfig } from '../types/paper-account';
 import { PaperAccountLedger } from './PaperAccountLedger';
 import { roundUsd } from './PaperLedgerMath';
 import {
@@ -26,8 +26,8 @@ export class PaperLedgerStore {
   private readonly canonicalCash: number;
 
   constructor(config: PaperAccountConfig, opts: PaperLedgerStoreOptions = {}) {
-    // R1: validate + clone config, store normalized initialCash
-    this.config = validatePaperAccountConfig({ ...config });
+    // R3: shared canonical config
+    this.config = canonicalizePaperAccountConfig(config);
     this.canonicalCash = roundUsd(this.config.initialCashUsd);
     this.baseDir = opts.baseDir ?? DEFAULT_BASE_DIR;
     if (opts.tmpSuffix) this._tmpSuffix = opts.tmpSuffix;
@@ -82,7 +82,8 @@ export class PaperLedgerStore {
         throw new PaperLedgerCorruptionError('Failed to parse ledger JSON');
       }
       // R1: strict doc validation
-      if (!doc || typeof doc !== 'object') throw new PaperLedgerCorruptionError('Document is not an object');
+      if (!doc || typeof doc !== 'object' || Array.isArray(doc))
+        throw new PaperLedgerCorruptionError('Document is not a plain object');
       if (doc.version !== 1) throw new UnsupportedPaperLedgerVersionError(`Version: ${doc?.version ?? 'missing'}`);
       const config = doc.config;
       if (!config || typeof config !== 'object') throw new PaperLedgerCorruptionError('Missing config');

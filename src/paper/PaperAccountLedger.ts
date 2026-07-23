@@ -7,7 +7,7 @@ import type {
   PaperAccountConfig, PaperPosition, PaperAccountSnapshot,
   PaperLedgerEntry, PaperFillLedgerEntry, PaperMarkLedgerEntry,
 } from '../types/paper-account';
-import { validatePaperAccountConfig } from '../types/paper-account';
+import { validatePaperAccountConfig, canonicalizePaperAccountConfig } from '../types/paper-account';
 import {
   roundUsd, roundQuantity, normalizeZero, assertFinitePositive,
   assertAccountingInvariant, ACCOUNTING_EPSILON, QUANTITY_EPSILON,
@@ -19,13 +19,6 @@ import {
 } from './errors';
 
 // ═══ Canonicalization ═══════════════════════════════════════════
-function canonicalizeConfig(c: PaperAccountConfig): PaperAccountConfig {
-  const cash = roundUsd(c.initialCashUsd);
-  if (!Number.isFinite(cash) || cash <= 0)
-    throw new PaperLedgerValidationError(`initialCashUsd rounds to ${cash} — rejected`);
-  return { accountId: c.accountId, exchange: c.exchange, initialCashUsd: cash };
-}
-
 function canonicalizeFill(f: PaperFill): PaperFill {
   const validated = validatePaperFill(f);
   const qty = roundQuantity(validated.quantity);
@@ -231,7 +224,7 @@ export class PaperAccountLedger {
   private state: LedgerState;
 
   constructor(config: PaperAccountConfig) {
-    const c = canonicalizeConfig(validatePaperAccountConfig(config));
+    const c = canonicalizePaperAccountConfig(config);
     this.state = {
       config: c, cashUsd: c.initialCashUsd, realizedPnlUsd: 0, unrealizedPnlUsd: 0, totalFeesUsd: 0,
       positions: new Map(), entries: [], processedFillIds: new Map(),

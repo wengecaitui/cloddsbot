@@ -3,6 +3,8 @@
 import type { ExchangeId } from '../data/MarketIdentity';
 import { isExchangeId } from '../data/MarketIdentity';
 import type { PaperFill } from './paper-fill';
+import { roundUsd } from '../paper/PaperLedgerMath';
+import { PaperLedgerValidationError } from '../paper/errors';
 
 // ─── Config ────────────────────────────────────────────────────
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -21,9 +23,19 @@ export function validatePaperAccountConfig(c: PaperAccountConfig): PaperAccountC
     throw new Error(`PaperAccountConfig: invalid ExchangeId ${JSON.stringify(c.exchange)}`);
   }
   if (typeof c.initialCashUsd !== 'number' || !Number.isFinite(c.initialCashUsd) || c.initialCashUsd <= 0) {
-    throw new Error(`PaperAccountConfig: initialCashUsd must be a finite positive number, got ${c.initialCashUsd}`);
+    throw new PaperLedgerValidationError(`initialCashUsd must be a finite positive number, got ${c.initialCashUsd}`);
   }
   return c;
+}
+
+/** R3: canonicalize config — round initialCash. Shared by Ledger and Store. */
+export function canonicalizePaperAccountConfig(c: PaperAccountConfig): PaperAccountConfig {
+  const validated = validatePaperAccountConfig(c);
+  const cash = roundUsd(validated.initialCashUsd);
+  if (!Number.isFinite(cash) || cash <= 0) {
+    throw new PaperLedgerValidationError(`initialCashUsd rounds to ${cash} — rejected`);
+  }
+  return { accountId: validated.accountId, exchange: validated.exchange, initialCashUsd: cash };
 }
 
 // ─── Position ──────────────────────────────────────────────────

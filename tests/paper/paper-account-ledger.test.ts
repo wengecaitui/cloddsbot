@@ -1030,3 +1030,68 @@ test('R1-25: replay missing entries document rejected', async () => {
     await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
 });
+
+// ═══ R3: Genuine post-clone rollback tests ═══
+
+test('R3-FILL-OVERFLOW: fill with product overflow → invariant fails, full state preserved', () => {
+  const l = new PaperAccountLedger(CONFIG);
+  l.applyFill(mkFill({ fillId: 'R3FO', side: 'buy', quantity: 1, priceUsd: 50000, feeUsd: 5, executedAt: 1 }));
+  const before = JSON.parse(JSON.stringify({ snapshot: l.snapshot(), entries: l.entries(), pos: l.getPosition('BTCUSDT'), config: l.getConfig() }));
+  assert.throws(
+    () => l.applyFill(mkFill({ fillId: 'R3FO2', side: 'buy', quantity: 1e200, priceUsd: 1e120, feeUsd: 0, executedAt: 2 })),
+    PaperLedgerInvariantError,
+  );
+  const after = JSON.parse(JSON.stringify({ snapshot: l.snapshot(), entries: l.entries(), pos: l.getPosition('BTCUSDT'), config: l.getConfig() }));
+  assert.deepStrictEqual(after, before, 'full state unchanged');
+  assert.equal(l.snapshot().sequence, 1); assert.equal(l.hasProcessedFill('R3FO2'), false);
+});
+
+test('R3-MARK-OVERFLOW: mark with product overflow → invariant fails, full state preserved', () => {
+  const l = new PaperAccountLedger({ accountId: 'test', exchange: 'bitget', initialCashUsd: 1e300 });
+  l.applyFill(mkFill({ fillId: 'R3MO', side: 'buy', quantity: 1e200, priceUsd: 1e-8, feeUsd: 0, executedAt: 1 }));
+  const before = JSON.parse(JSON.stringify({ snapshot: l.snapshot(), entries: l.entries(), pos: l.getPosition('BTCUSDT'), config: l.getConfig() }));
+  assert.throws(
+    () => l.markToMarket({ exchange: 'bitget', symbol: 'BTCUSDT', markPriceUsd: 1e120, markedAt: 2 }),
+    PaperLedgerInvariantError,
+  );
+  const after = JSON.parse(JSON.stringify({ snapshot: l.snapshot(), entries: l.entries(), pos: l.getPosition('BTCUSDT'), config: l.getConfig() }));
+  assert.deepStrictEqual(after, before, 'full state unchanged');
+  assert.equal(l.snapshot().sequence, 1); assert.equal(l.entries().length, 1);
+});
+
+// ═══ R3: Store canonical tests ═══
+test('R3-STORE-CANONICAL: rejects 1e-10', () => {
+  assert.throws(() => new PaperLedgerStore({ accountId: 't', exchange: 'bitget', initialCashUsd: 1e-10 }), PaperLedgerValidationError);
+});
+test('R3-STORE-CANONICAL: rejects MAX_VALUE', () => {
+  assert.throws(() => new PaperLedgerStore({ accountId: 't', exchange: 'bitget', initialCashUsd: Number.MAX_VALUE }), PaperLedgerValidationError);
+});
+test('R3-STORE-CANONICAL: saved doc uses canonical cash', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    const store = new PaperLedgerStore({ accountId: 't', exchange: 'bitget', initialCashUsd: 10000.000000001 }, { baseDir: dir });
+    const l = new PaperAccountLedger({ accountId: 't', exchange: 'bitget', initialCashUsd: 10000.000000001 });
+    await store.save(l);
+    const raw = JSON.parse(await fs.readFile(path.join(dir, 'account.bitget.t.json'), 'utf-8'));
+    assert.equal(raw.config.initialCashUsd, 10000);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('R3-STORE-CORR: persisted cash identity mismatch → rejects', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    // File claims initialCash=5000, store has 10000 → identity rejects before canonicalization
+    await fs.writeFile(path.join(dir, 'account.bitget.test.json'), JSON.stringify({ version: 1, config: { accountId: 'test', exchange: 'bitget', initialCashUsd: 5000 }, entries: [] }), 'utf-8');
+    const store = new PaperLedgerStore({ accountId: 'test', exchange: 'bitget', initialCashUsd: 10000 }, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerIdentityMismatchError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+test('R3-STORE-CORR: JSON array → corruption', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'paper-'));
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'account.bitget.test.json'), '[]', 'utf-8');
+    const store = new PaperLedgerStore({ accountId: 'test', exchange: 'bitget', initialCashUsd: 10000 }, { baseDir: dir });
+    await assert.rejects(() => store.load(), PaperLedgerCorruptionError);
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
