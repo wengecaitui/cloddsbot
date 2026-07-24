@@ -28,6 +28,7 @@ import type { EngineInput } from './DecisionEngine';
 import type { MarketSnapshotStore } from '../data/MarketSnapshot';
 import type { CandleSeriesStore } from '../data/CandleSeriesStore';
 import type { Series } from '../data/types';
+import type { ExecutionQuote } from '../types/execution-quote';
 import { computePositionUsd } from './PositionSizer';
 import type { TradeIntent } from '../types/trade-intent';
 import { createTradeIntent } from '../types/trade-intent';
@@ -58,8 +59,9 @@ export interface FastPipelineResult {
   direction?: 'long' | 'short' | 'hold';
   symbol?: string;
   positionUsd?: number;
-  /** Stage 3B4C7: risk-admitted trade intent (only present when decision='trade'). */
   tradeIntent?: TradeIntent;
+  /** Stage 3B4C14: execution quote from same-snapshot ticker (trade only). */
+  executionQuote?: ExecutionQuote;
   reason: string;
   elapsedMs: number;
   biasReport: MarketBiasReportFull | null;
@@ -236,6 +238,20 @@ export class FastPipeline extends EventEmitter {
         };
       }
 
+      // ─── Stage 3B4C14: capture execution quote from same snapshot ───
+      const tickerWrapper = snapshot.ticker;
+      let executionQuote: ExecutionQuote | undefined;
+      if (tickerWrapper && typeof tickerWrapper.ticker.last === 'number' && Number.isFinite(tickerWrapper.ticker.last) && tickerWrapper.ticker.last > 0 &&
+          typeof tickerWrapper.ticker.ts === 'number' && Number.isFinite(tickerWrapper.ticker.ts) && tickerWrapper.ticker.ts >= 0) {
+        executionQuote = {
+          exchange: snapshot.exchange,
+          symbol: snapshot.symbol,
+          markPriceUsd: tickerWrapper.ticker.last,
+          executedAtMs: tickerWrapper.ticker.ts,
+          snapshotVersion: snapshot.snapshotVersion,
+        };
+      }
+
       if (snapshot.isStale) {
         return {
           exchange: this.config.exchange,
@@ -303,14 +319,14 @@ export class FastPipeline extends EventEmitter {
         series,
       });
 
-      return this.decide(signal, biasReport, indicatorResults, startTime);
+      return this.decide(signal, biasReport, indicatorResults, startTime, executionQuote);
     }
 
     const indicatorResults = await this.config.indicatorService.calculateAll({
       asset: signal.symbol,
     });
 
-    return this.decide(signal, biasReport, indicatorResults, startTime);
+    return this.decide(signal, biasReport, indicatorResults, startTime, undefined);
   }
 
   /**
@@ -318,12 +334,14 @@ export class FastPipeline extends EventEmitter {
    *
    * Stage 3B4C7-R1: unified rejection helper, runtime direction validation,
    * bias.direction === deResult.direction gate, PositionSizer symbol+direction.
+   * Stage 3B4C14: executionQuote attached to trade results only.
    */
   private decide(
     signal: { exchange: ExchangeId; source: string; symbol: string; signalData?: Record<string, unknown> },
     biasReport: MarketBiasReportFull,
     indicatorResults: import('../types/indicators').IndicatorResult[],
     startTime: number,
+    executionQuote?: ExecutionQuote,
   ): FastPipelineResult {
     const bias = biasReport.assets.find(a => a.symbol === signal.symbol);
 
@@ -491,6 +509,7 @@ export class FastPipeline extends EventEmitter {
       symbol: signal.symbol,
       positionUsd: requestedPositionUsd,
       tradeIntent,
+      executionQuote,
       reason: deResult.reason,
       elapsedMs: Date.now() - startTime,
       biasReport,
