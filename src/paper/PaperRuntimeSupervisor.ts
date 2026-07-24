@@ -1,43 +1,44 @@
-// Stage 4A3: PaperRuntimeSupervisor — lifecycle state machine + graceful supervision.
+// Stage 4A3-R1: Supervisor — typed transitions, async-safe events, failed recovery, metrics.
 import type { ExchangeId } from '../data/MarketIdentity';
 import { isExchangeId } from '../data/MarketIdentity';
 import { PaperRuntimeRegistry, type PaperRuntimeBinding } from './PaperRuntimeRegistry';
-import { PaperFastPathCoordinator, type PaperCoordinatorResult } from './PaperFastPathCoordinator';
-import type { Clock, PaperRuntimeEventSink, PaperRuntimeEvent } from './PaperObservability';
-import { systemClock, NullPaperRuntimeEventSink, makeEventId } from './PaperObservability';
+import type { PaperCoordinatorResult } from './PaperFastPathCoordinator';
+import type { Clock, PaperRuntimeEventSink, PaperRuntimeLifecycleMetricsSnapshot } from './PaperObservability';
+import { systemClock, NullPaperRuntimeEventSink, makeEventId, emitSafe } from './PaperObservability';
 import {
   type PaperRuntimeLifecycleState, type PaperRuntimeLifecycleSnapshot,
   type PaperRuntimeBatchResult, type PaperRuntimeLifecycleAdapter,
+  type ActiveTransition, type LifecycleOperation,
   PaperRuntimeLifecycleError, NoopPaperRuntimeLifecycleAdapter,
 } from './PaperLifecycle';
 
-// ── Internal state ────────────────────────────────────────────
 interface LifecycleRecord {
-  accountId: string;
-  exchange: ExchangeId;
+  accountId: string; exchange: ExchangeId;
   state: PaperRuntimeLifecycleState;
   generation: number;
-  registeredAtMs: number;
-  lastTransitionAtMs: number;
-  startedAtMs?: number;
-  stoppedAtMs?: number;
-  lastFailureAtMs?: number;
-  lastErrorCode?: string;
-  lastErrorMessage?: string;
+  registeredAtMs: number; lastTransitionAtMs: number;
+  startedAtMs?: number; stoppedAtMs?: number;
+  lastFailureAtMs?: number; lastErrorCode?: string; lastErrorMessage?: string;
   inFlightRuns: number;
   adapter: PaperRuntimeLifecycleAdapter;
-  transitionGate: Promise<unknown> | null; // active transition peer
-  drainPromise: Promise<void> | null;     // graceful stop drain
-  drainResolve: (() => void) | null;      // resolve drain when inFlight=0
+  activeTransition: ActiveTransition | null;
+  drainResolve: (() => void) | null;
   metrics: {
-    startTotal: number; startFailed: number;
-    stopTotal: number; stopFailed: number;
-    restartTotal: number; restartFailed: number;
-    runRejected: number; inFlightMax: number;
+    startTotal: number; startFailed: number; stopTotal: number; stopFailed: number;
+    restartTotal: number; restartFailed: number; runRejected: number; inFlightMax: number;
   };
 }
 
-// ── Supervisor ────────────────────────────────────────────────
+function snapshot(r: LifecycleRecord): PaperRuntimeLifecycleSnapshot {
+  return Object.freeze({
+    accountId: r.accountId, exchange: r.exchange, state: r.state,
+    acceptingRuns: r.state === 'running', inFlightRuns: r.inFlightRuns, generation: r.generation,
+    registeredAtMs: r.registeredAtMs, lastTransitionAtMs: r.lastTransitionAtMs,
+    startedAtMs: r.startedAtMs, stoppedAtMs: r.stoppedAtMs,
+    lastFailureAtMs: r.lastFailureAtMs, lastErrorCode: r.lastErrorCode, lastErrorMessage: r.lastErrorMessage,
+  });
+}
+
 export class PaperRuntimeSupervisor {
   private records = new Map<string, LifecycleRecord>();
   private registry: PaperRuntimeRegistry;
@@ -45,193 +46,192 @@ export class PaperRuntimeSupervisor {
   private clock: Clock;
 
   constructor(opts: { registry: PaperRuntimeRegistry; eventSink?: PaperRuntimeEventSink; clock?: Clock }) {
-    this.registry = opts.registry;
-    this.sink = opts.eventSink ?? new NullPaperRuntimeEventSink();
-    this.clock = opts.clock ?? systemClock;
+    this.registry = opts.registry; this.sink = opts.eventSink ?? new NullPaperRuntimeEventSink(); this.clock = opts.clock ?? systemClock;
   }
 
-  private key(accountId: string, exchange: ExchangeId): string { return `${accountId}:${exchange}`; }
-  private validateKey(accountId: string, exchange: ExchangeId): void {
-    if (typeof accountId !== 'string' || accountId !== accountId.trim() || accountId.length === 0) throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_ACCOUNT', 'invalid accountId', accountId, exchange);
-    if (!isExchangeId(exchange)) throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_EXCHANGE', 'invalid exchange', accountId, exchange);
+  private key(aid: string, ex: ExchangeId): string { return `${aid}:${ex}`; }
+  private validate(aid: string, ex: ExchangeId): void {
+    if (typeof aid !== 'string' || aid !== aid.trim() || aid.length === 0) throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_ACCOUNT', 'invalid', aid, ex);
+    if (!isExchangeId(ex)) throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_EXCHANGE', 'invalid', aid, ex);
   }
-  private get(accountId: string, exchange: ExchangeId): LifecycleRecord {
-    this.validateKey(accountId, exchange);
-    const r = this.records.get(this.key(accountId, exchange));
-    if (!r) throw new PaperRuntimeLifecycleError('RUNTIME_NOT_REGISTERED', `no lifecycle for ${accountId}:${exchange}`, accountId, exchange);
+  private get(aid: string, ex: ExchangeId): LifecycleRecord {
+    this.validate(aid, ex); const r = this.records.get(this.key(aid, ex));
+    if (!r) throw new PaperRuntimeLifecycleError('RUNTIME_NOT_REGISTERED', `no lifecycle for ${aid}:${ex}`, aid, ex);
     return r;
   }
-  private emit(e: PaperRuntimeEvent): void { try { void this.sink.emit(e); } catch {} }
 
-  // ── Snapshot ────────────────────────────────────────────────
-  private snapshot(r: LifecycleRecord): PaperRuntimeLifecycleSnapshot {
-    return Object.freeze({
-      accountId: r.accountId, exchange: r.exchange,
-      state: r.state, acceptingRuns: r.state === 'running',
-      inFlightRuns: r.inFlightRuns, generation: r.generation,
-      registeredAtMs: r.registeredAtMs, lastTransitionAtMs: r.lastTransitionAtMs,
-      startedAtMs: r.startedAtMs, stoppedAtMs: r.stoppedAtMs,
-      lastFailureAtMs: r.lastFailureAtMs, lastErrorCode: r.lastErrorCode, lastErrorMessage: r.lastErrorMessage,
-    });
-  }
-
-  // ── Register ────────────────────────────────────────────────
+  // ── Register / Unregister ───────────────────────────────────
   register(binding: PaperRuntimeBinding, adapter?: PaperRuntimeLifecycleAdapter): void {
     this.registry.register(binding);
     const now = this.clock.now();
     const r: LifecycleRecord = {
-      accountId: binding.accountId, exchange: binding.exchange,
-      state: 'stopped', generation: 0, registeredAtMs: now, lastTransitionAtMs: now,
-      inFlightRuns: 0,
+      accountId: binding.accountId, exchange: binding.exchange, state: 'stopped', generation: 0,
+      registeredAtMs: now, lastTransitionAtMs: now, inFlightRuns: 0,
       adapter: adapter ?? new NoopPaperRuntimeLifecycleAdapter(),
-      transitionGate: null, drainPromise: null, drainResolve: null,
-      metrics: { startTotal:0, startFailed:0, stopTotal:0, stopFailed:0, restartTotal:0, restartFailed:0, runRejected:0, inFlightMax:0 },
+      activeTransition: null, drainResolve: null,
+      metrics: { startTotal:0,startFailed:0,stopTotal:0,stopFailed:0,restartTotal:0,restartFailed:0,runRejected:0,inFlightMax:0 },
     };
     this.records.set(this.key(binding.accountId, binding.exchange), r);
   }
 
-  unregister(accountId: string, exchange: ExchangeId): boolean {
-    const r = this.get(accountId, exchange);
-    if (r.state !== 'stopped') throw new PaperRuntimeLifecycleError('RUNTIME_NOT_STOPPED', `cannot unregister in state ${r.state}`, accountId, exchange);
-    if (r.inFlightRuns !== 0) throw new PaperRuntimeLifecycleError('RUNTIME_NOT_STOPPED', 'in-flight runs pending', accountId, exchange);
-    if (r.transitionGate) throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', 'transition in progress', accountId, exchange);
-    this.records.delete(this.key(accountId, exchange));
-    return this.registry.unregister(accountId, exchange);
+  unregister(aid: string, ex: ExchangeId): boolean {
+    const r = this.get(aid, ex);
+    if (r.state !== 'stopped') throw new PaperRuntimeLifecycleError('RUNTIME_NOT_STOPPED', `unregister in ${r.state}`, aid, ex);
+    if (r.inFlightRuns !== 0) throw new PaperRuntimeLifecycleError('RUNTIME_NOT_STOPPED', 'in-flight pending', aid, ex);
+    if (r.activeTransition) throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', 'transition in progress', aid, ex);
+    this.records.delete(this.key(aid, ex));
+    return this.registry.unregister(aid, ex);
   }
 
-  // ── Lifecycle queries ───────────────────────────────────────
-  lifecycle(accountId: string, exchange: ExchangeId): PaperRuntimeLifecycleSnapshot { return this.snapshot(this.get(accountId, exchange)); }
+  // ── Queries ─────────────────────────────────────────────────
+  lifecycle(aid: string, ex: ExchangeId): PaperRuntimeLifecycleSnapshot { return snapshot(this.get(aid, ex)); }
   lifecycleAll(): readonly PaperRuntimeLifecycleSnapshot[] {
-    return [...this.records.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([,r])=>this.snapshot(r));
+    return [...this.records.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([,r])=>snapshot(r));
+  }
+  metrics(aid: string, ex: ExchangeId): PaperRuntimeLifecycleMetricsSnapshot {
+    const r = this.get(aid, ex); const m = r.metrics;
+    return Object.freeze({ accountId: aid, exchange: ex, lifecycleStartTotal: m.startTotal, lifecycleStartFailedTotal: m.startFailed, lifecycleStopTotal: m.stopTotal, lifecycleStopFailedTotal: m.stopFailed, lifecycleRestartTotal: m.restartTotal, lifecycleRestartFailedTotal: m.restartFailed, lifecycleRunRejectedTotal: m.runRejected, lifecycleInFlightCurrent: r.inFlightRuns, lifecycleInFlightMax: m.inFlightMax });
+  }
+  metricsAll(): readonly PaperRuntimeLifecycleMetricsSnapshot[] {
+    return [...this.records.entries()].sort(([a],[b])=>a.localeCompare(b)).map(([,r])=>this.metrics(r.accountId, r.exchange));
+  }
+
+  // ── Conflict check ──────────────────────────────────────────
+  private checkConflict(r: LifecycleRecord, op: LifecycleOperation, aid: string, ex: ExchangeId): void {
+    if (!r.activeTransition) return;
+    if (r.activeTransition.operation !== op) throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', `${op} rejected: ${r.activeTransition.operation} in progress`, aid, ex);
   }
 
   // ── Start ───────────────────────────────────────────────────
-  async start(accountId: string, exchange: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
-    const r = this.get(accountId, exchange);
-    if (r.state === 'running') return this.snapshot(r);
-
-    // Concurrent transition check
-    if (r.transitionGate) { await r.transitionGate; return this.snapshot(r); }
-    if (r.state === 'starting') { await new Promise(res => setTimeout(res, 10)); return this.snapshot(r); }
-
+  async start(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
+    const r = this.get(aid, ex);
+    if (r.state === 'running') return snapshot(r);
+    if (r.state === 'failed') throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_STATE', 'cannot start from failed', aid, ex);
+    this.checkConflict(r, 'start', aid, ex);
+    // Concurrent start → share same transition
+    if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
     const gate = this._doStart(r);
-    r.transitionGate = gate;
-    try { await gate; return this.snapshot(r); }
-    finally { r.transitionGate = null; }
+    r.activeTransition = { operation: 'start', promise: gate };
+    try { await gate; return snapshot(r); } finally { r.activeTransition = null; }
   }
 
-  private async _doStart(r: LifecycleRecord): Promise<void> {
+  private async _doStart(r: LifecycleRecord): Promise<PaperRuntimeLifecycleSnapshot> {
     const now = this.clock.now();
     r.metrics.startTotal++;
     r.state = 'starting'; r.lastTransitionAtMs = now;
-    this.emit({ eventId: makeEventId(), eventType: 'runtime.starting' as any, accountId: r.accountId, exchange: r.exchange, occurredAtMs: now, metadata: { lifecycleState: 'starting', generation: r.generation, inFlightRuns: r.inFlightRuns } });
+    await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.starting', accountId: r.accountId, exchange: r.exchange, occurredAtMs: now, metadata: { lifecycleState: 'starting', generation: r.generation, inFlightRuns: r.inFlightRuns } });
     try {
       await r.adapter.start();
       r.state = 'running'; r.generation++; r.lastTransitionAtMs = this.clock.now(); r.startedAtMs = this.clock.now();
-      this.emit({ eventId: makeEventId(), eventType: 'runtime.started' as any, accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'running', generation: r.generation } });
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.started', accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'running', generation: r.generation } });
+      return snapshot(r);
     } catch (err: unknown) {
-      r.state = 'failed'; r.lastFailureAtMs = this.clock.now();
-      r.lastErrorCode = 'LIFECYCLE_START_FAILED'; r.lastErrorMessage = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      r.state = 'failed'; r.lastFailureAtMs = this.clock.now(); r.lastErrorCode = 'LIFECYCLE_START_FAILED'; r.lastErrorMessage = msg;
       r.metrics.startFailed++;
-      this.emit({ eventId: makeEventId(), eventType: 'runtime.lifecycle_error' as any, accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), errorCode: r.lastErrorCode, errorMessage: r.lastErrorMessage, metadata: { lifecycleState: 'failed', generation: r.generation } });
-      throw new PaperRuntimeLifecycleError('LIFECYCLE_START_FAILED', r.lastErrorMessage!, r.accountId, r.exchange);
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.lifecycle_error', accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), errorCode: r.lastErrorCode, errorMessage: r.lastErrorMessage, metadata: { lifecycleState: 'failed', generation: r.generation } });
+      throw new PaperRuntimeLifecycleError('LIFECYCLE_START_FAILED', msg, r.accountId, r.exchange);
     }
   }
 
   // ── Stop ────────────────────────────────────────────────────
-  async stop(accountId: string, exchange: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
-    const r = this.get(accountId, exchange);
-    if (r.state === 'stopped') return this.snapshot(r);
-    if (r.state === 'failed') return this.snapshot(r);
-    if (r.state === 'stopping') { await (r.transitionGate ?? Promise.resolve()); return this.snapshot(r); }
-    if (r.transitionGate) throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', 'stop rejected: transition in progress', accountId, exchange);
-    if (r.state !== 'running' && r.state !== 'starting') throw new PaperRuntimeLifecycleError('LIFECYCLE_INVALID_STATE', `cannot stop from ${r.state}`, accountId, exchange);
+  async stop(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
+    const r = this.get(aid, ex);
+    if (r.state === 'stopped') return snapshot(r);
+    if (r.state === 'failed') return this._recoveryStop(r);
+    this.checkConflict(r, 'stop', aid, ex);
+    if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
     const gate = this._doStop(r);
-    r.transitionGate = gate;
-    try { await gate; return this.snapshot(r); }
-    finally { r.transitionGate = null; }
+    r.activeTransition = { operation: 'stop', promise: gate };
+    try { await gate; return snapshot(r); } finally { r.activeTransition = null; }
   }
 
-  private async _doStop(r: LifecycleRecord): Promise<void> {
+  private async _recoveryStop(r: LifecycleRecord): Promise<PaperRuntimeLifecycleSnapshot> {
+    const now = this.clock.now();
+    r.state = 'stopping'; r.lastTransitionAtMs = now;
+    try {
+      await r.adapter.stop();
+      r.state = 'stopped'; r.lastTransitionAtMs = this.clock.now(); r.stoppedAtMs = this.clock.now();
+      return snapshot(r);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      r.state = 'failed'; r.lastFailureAtMs = this.clock.now(); r.lastErrorCode = 'LIFECYCLE_STOP_FAILED'; r.lastErrorMessage = msg;
+      throw new PaperRuntimeLifecycleError('LIFECYCLE_STOP_FAILED', msg, r.accountId, r.exchange);
+    }
+  }
+
+  private async _doStop(r: LifecycleRecord): Promise<PaperRuntimeLifecycleSnapshot> {
     const now = this.clock.now();
     r.metrics.stopTotal++;
     r.state = 'stopping'; r.lastTransitionAtMs = now;
-    this.emit({ eventId: makeEventId(), eventType: 'runtime.stopping' as any, accountId: r.accountId, exchange: r.exchange, occurredAtMs: now, metadata: { lifecycleState: 'stopping', inFlightRuns: r.inFlightRuns } });
+    await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.stopping', accountId: r.accountId, exchange: r.exchange, occurredAtMs: now, metadata: { lifecycleState: 'stopping', inFlightRuns: r.inFlightRuns } });
     // Graceful drain
     if (r.inFlightRuns > 0) {
-      r.drainPromise = new Promise<void>(res => { r.drainResolve = res; });
-      await r.drainPromise;
+      await new Promise<void>(res => { r.drainResolve = res; });
     }
     try {
       await r.adapter.stop();
       r.state = 'stopped'; r.lastTransitionAtMs = this.clock.now(); r.stoppedAtMs = this.clock.now();
-      this.emit({ eventId: makeEventId(), eventType: 'runtime.stopped' as any, accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'stopped' } });
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.stopped', accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'stopped' } });
+      return snapshot(r);
     } catch (err: unknown) {
-      r.state = 'failed'; r.lastFailureAtMs = this.clock.now();
-      r.lastErrorCode = 'LIFECYCLE_STOP_FAILED'; r.lastErrorMessage = err instanceof Error ? err.message : String(err);
+      const msg = err instanceof Error ? err.message : String(err);
+      r.state = 'failed'; r.lastFailureAtMs = this.clock.now(); r.lastErrorCode = 'LIFECYCLE_STOP_FAILED'; r.lastErrorMessage = msg;
       r.metrics.stopFailed++;
-      this.emit({ eventId: makeEventId(), eventType: 'runtime.lifecycle_error' as any, accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), errorCode: r.lastErrorCode, errorMessage: r.lastErrorMessage });
-    } finally {
-      r.drainPromise = null; r.drainResolve = null;
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.lifecycle_error', accountId: r.accountId, exchange: r.exchange, occurredAtMs: this.clock.now(), errorCode: r.lastErrorCode, errorMessage: r.lastErrorMessage });
+      throw new PaperRuntimeLifecycleError('LIFECYCLE_STOP_FAILED', msg, r.accountId, r.exchange);
     }
   }
 
   // ── Restart ─────────────────────────────────────────────────
-  async restart(accountId: string, exchange: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
-    const r = this.get(accountId, exchange);
-    if (r.transitionGate) throw new PaperRuntimeLifecycleError('LIFECYCLE_TRANSITION_IN_PROGRESS', 'restart rejected: transition in progress', accountId, exchange);
+  async restart(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
+    const r = this.get(aid, ex);
+    this.checkConflict(r, 'restart', aid, ex);
+    if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
     r.metrics.restartTotal++;
-    this.emit({ eventId: makeEventId(), eventType: 'runtime.restarting' as any, accountId, exchange, occurredAtMs: this.clock.now() });
+    await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.restarting', accountId: aid, exchange: ex, occurredAtMs: this.clock.now() });
     const gate = (async () => {
-      if (r.state === 'running') await this._doStop(r);
+      // Failed recovery: stop first if running
+      if (r.state === 'running') {
+        try { await this._doStop(r); } catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
+      }
       if (r.state === 'failed') {
         // Recovery stop
-        try { await r.adapter.stop(); } catch {}
+        try { r.state = 'stopping'; await r.adapter.stop(); r.state = 'stopped'; r.lastTransitionAtMs = this.clock.now(); r.stoppedAtMs = this.clock.now(); }
+        catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
       }
-      if (r.state === 'stopped' || r.state === 'failed') {
-        await this._doStart(r);
-        this.emit({ eventId: makeEventId(), eventType: 'runtime.restarted' as any, accountId, exchange, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'running', generation: r.generation } });
-      }
+      // Now start
+      try { await this._doStart(r); } catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
+      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.restarted', accountId: aid, exchange: ex, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'running', generation: r.generation } });
+      return snapshot(r);
     })();
-    r.transitionGate = gate;
-    try { await gate; return this.snapshot(r); }
-    catch (err) {
-      r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = err instanceof Error ? err.message : String(err);
-      r.metrics.restartFailed++;
-      this.emit({ eventId: makeEventId(), eventType: 'runtime.lifecycle_error' as any, accountId, exchange, occurredAtMs: this.clock.now(), errorCode: r.lastErrorCode, errorMessage: r.lastErrorMessage });
-      throw err;
-    }
-    finally { r.transitionGate = null; }
+    r.activeTransition = { operation: 'restart', promise: gate };
+    try { return await gate; } finally { r.activeTransition = null; }
   }
 
-  // ── Lifecycle-gated run ─────────────────────────────────────
-  async run(accountId: string, signal: { exchange: ExchangeId; symbol: string; source: string }, params: { feeBps: number; slippageBps: number }): Promise<PaperCoordinatorResult> {
-    const r = this.get(accountId, signal.exchange);
-    if (r.state !== 'running') { r.metrics.runRejected++; throw new PaperRuntimeLifecycleError('RUNTIME_NOT_RUNNING', `cannot run in state ${r.state}`, accountId, signal.exchange); }
-    r.inFlightRuns++;
-    if (r.inFlightRuns > r.metrics.inFlightMax) r.metrics.inFlightMax = r.inFlightRuns;
-    try {
-      return await this.registry.run(accountId, signal, params);
-    } finally {
-      r.inFlightRuns--;
-      if (r.inFlightRuns === 0 && r.drainResolve) { const res = r.drainResolve; r.drainResolve = null; res(); }
-    }
+  // ── Run ─────────────────────────────────────────────────────
+  async run(aid: string, signal: { exchange: ExchangeId; symbol: string; source: string }, params: { feeBps: number; slippageBps: number }): Promise<PaperCoordinatorResult> {
+    const r = this.get(aid, signal.exchange);
+    if (r.state !== 'running') { r.metrics.runRejected++; await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.lifecycle_rejected', accountId: aid, exchange: signal.exchange, occurredAtMs: this.clock.now(), errorCode: 'RUNTIME_NOT_RUNNING', metadata: { lifecycleState: r.state, generation: r.generation, inFlightRuns: r.inFlightRuns } }); throw new PaperRuntimeLifecycleError('RUNTIME_NOT_RUNNING', `state=${r.state}`, aid, signal.exchange); }
+    r.inFlightRuns++; if (r.inFlightRuns > r.metrics.inFlightMax) r.metrics.inFlightMax = r.inFlightRuns;
+    try { return await this.registry.run(aid, signal, params); }
+    finally { r.inFlightRuns--; if (r.inFlightRuns === 0 && r.drainResolve) { const res = r.drainResolve; r.drainResolve = null; res(); } }
   }
 
   // ── Batch ───────────────────────────────────────────────────
   async startAll(): Promise<readonly PaperRuntimeBatchResult[]> {
     const results: PaperRuntimeBatchResult[] = [];
     for (const r of [...this.records.values()].sort((a,b)=>this.key(a.accountId,a.exchange).localeCompare(this.key(b.accountId,b.exchange)))) {
-      try { await this.start(r.accountId, r.exchange); results.push({ accountId: r.accountId, exchange: r.exchange, operation: 'start', success: true, state: this.snapshot(r).state }); }
-      catch (e: any) { results.push({ accountId: r.accountId, exchange: r.exchange, operation: 'start', success: false, state: this.snapshot(r).state, errorCode: e?.code, errorMessage: e?.message }); }
+      try { await this.start(r.accountId, r.exchange); results.push(Object.freeze({ accountId: r.accountId, exchange: r.exchange, operation: 'start' as const, success: true, state: r.state })); }
+      catch (err: unknown) { const e = err instanceof Error ? err : new Error(String(err)); const code = e instanceof PaperRuntimeLifecycleError ? e.code : undefined; results.push(Object.freeze({ accountId: r.accountId, exchange: r.exchange, operation: 'start' as const, success: false, state: r.state, errorCode: code, errorMessage: e.message })); }
     }
     return results;
   }
   async stopAll(): Promise<readonly PaperRuntimeBatchResult[]> {
     const results: PaperRuntimeBatchResult[] = [];
     for (const r of [...this.records.values()].sort((a,b)=>this.key(a.accountId,a.exchange).localeCompare(this.key(b.accountId,b.exchange)))) {
-      try { await this.stop(r.accountId, r.exchange); results.push({ accountId: r.accountId, exchange: r.exchange, operation: 'stop', success: true, state: this.snapshot(r).state }); }
-      catch (e: any) { results.push({ accountId: r.accountId, exchange: r.exchange, operation: 'stop', success: false, state: this.snapshot(r).state, errorCode: e?.code, errorMessage: e?.message }); }
+      try { await this.stop(r.accountId, r.exchange); const s = snapshot(r); results.push(Object.freeze({ accountId: r.accountId, exchange: r.exchange, operation: 'stop' as const, success: s.state === 'stopped', state: s.state })); }
+      catch (err: unknown) { const e = err instanceof Error ? err : new Error(String(err)); const code = e instanceof PaperRuntimeLifecycleError ? e.code : undefined; results.push(Object.freeze({ accountId: r.accountId, exchange: r.exchange, operation: 'stop' as const, success: false, state: r.state, errorCode: code, errorMessage: e.message })); }
     }
     return results;
   }
