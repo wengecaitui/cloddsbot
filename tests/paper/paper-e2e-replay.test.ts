@@ -13,10 +13,11 @@ import type { PaperAccountConfig } from '../../src/types/paper-account';
 import type { TradeIntent } from '../../src/types/trade-intent';
 import type { FillSimulatorConfig } from '../../src/paper/FillSimulator';
 import { PaperLedgerCorruptionError, PaperLedgerIdentityMismatchError } from '../../src/paper/errors';
+import { createTradeIntent } from '../../src/types/trade-intent';
 
 const CONFIG: PaperAccountConfig = { accountId: 'e2e01', exchange: 'bitget', initialCashUsd: 100_000 };
-const INTENT_LONG: TradeIntent = { exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 5000, orderType: 'market', source: 'e2e', createdAt: 1000, reason: 'test', biasUpdatedAt: 1000 };
-const INTENT_SHORT: TradeIntent = { exchange: 'bitget', symbol: 'BTCUSDT', direction: 'short', positionUsd: 3000, orderType: 'market', source: 'e2e', createdAt: 1500, reason: 'test', biasUpdatedAt: 1500 };
+const INTENT_LONG = createTradeIntent({ exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 5000, source: 'e2e', reason: 'test', biasUpdatedAt: 1000, createdAt: 1000 });
+const INTENT_SHORT = createTradeIntent({ exchange: 'bitget', symbol: 'BTCUSDT', direction: 'short', positionUsd: 3000, source: 'e2e', reason: 'test', biasUpdatedAt: 1500, createdAt: 1500 });
 const SCFG: FillSimulatorConfig = { markPriceUsd: 50000, feeBps: 10, slippageBps: 0, executedAtMs: 2000 };
 
 function digest(entries: any[], snapshot: any): string {
@@ -76,8 +77,8 @@ test('4. long then short → flip via broker', async () => {
     const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
     const b = await PaperBroker.open(CONFIG, store);
     await b.execute(INTENT_LONG, SCFG, 4);
-    await b.execute({ ...INTENT_SHORT, positionUsd: 10000 }, SCFG, 5);
-    const r = await b.execute(INTENT_LONG, SCFG, 6);
+    await b.execute(createTradeIntent({ exchange: 'bitget', symbol: 'BTCUSDT', direction: 'short', positionUsd: 10000, source: 'e2e', reason: 'test', biasUpdatedAt: 1500, createdAt: 1501 }), SCFG, 5);
+    const r = await b.execute(createTradeIntent({ exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 8000, source: 'e2e', reason: 'test', biasUpdatedAt: 1000, createdAt: 1002 }), SCFG, 6);
     assert.equal(r.status, 'applied');
     assert.equal(b.snapshot().processedFills, 3);
   } finally { await fs.rm(dir, { recursive: true, force: true }); }
@@ -307,7 +308,7 @@ test('20. add: two long fills → avg price, restarts consistent', async () => {
     const store = new PaperLedgerStore(CONFIG, { baseDir: dir });
     const b = await PaperBroker.open(CONFIG, store);
     await b.execute(INTENT_LONG, SCFG, 30);
-    await b.execute(INTENT_LONG, SCFG, 31);
+    await b.execute(createTradeIntent({ exchange: 'bitget', symbol: 'BTCUSDT', direction: 'long', positionUsd: 3000, source: 'e2e', reason: 'test', biasUpdatedAt: 1000, createdAt: 1001 }), SCFG, 31);
     assert.equal(b.snapshot().openPositions, 1);
     const b2 = await PaperBroker.open(CONFIG, store);
     assert.equal(b2.snapshot().openPositions, 1);

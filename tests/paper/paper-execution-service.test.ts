@@ -167,12 +167,16 @@ test('19. save failure → failed, state preserved', async () => {
   const d = await fs.mkdtemp(path.join(os.tmpdir(), 's13-'));
   try {
     const svc = await open(d); await svc.execute(mkIntent(), EP);
-    await fs.chmod(path.join(d, 'account.bitget.s13.json'), 0o444);
-    try {
-      const r = await svc.execute(mkIntent({ direction: 'short' }), EP);
-      assert.equal(r.status, 'failed');
-    } finally { await fs.chmod(path.join(d, 'account.bitget.s13.json'), 0o644); }
-    assert.equal(svc.snapshot().processedFills, 1);
+    // Re-open with save-injecting wrapper
+    const store = new PaperLedgerStore(an, { baseDir: d });
+    let failNext = true;
+    const faulty = Object.create(store) as PaperLedgerStore;
+    faulty.save = async (l: any) => { if (failNext) { failNext = false; throw new Error('injected'); } return store.save(l); };
+    faulty.load = () => store.load();
+    const svc2 = await PaperExecutionService.open(an, faulty);
+    const r = await svc2.execute(mkIntent({ direction: 'short' }), EP);
+    assert.equal(r.status, 'failed', r.error ?? '');
+    assert.equal(svc2.snapshot().processedFills, svc.snapshot().processedFills, 'state preserved');
   } finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 
