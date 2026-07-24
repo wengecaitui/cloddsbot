@@ -187,26 +187,35 @@ export class PaperRuntimeSupervisor {
   async restart(aid: string, ex: ExchangeId): Promise<PaperRuntimeLifecycleSnapshot> {
     const r = this.get(aid, ex);
     this.checkConflict(r, 'restart', aid, ex);
+    // Concurrent restart → share same transition
     if (r.activeTransition) { await r.activeTransition.promise; return snapshot(r); }
     r.metrics.restartTotal++;
-    await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.restarting', accountId: aid, exchange: ex, occurredAtMs: this.clock.now() });
-    const gate = (async () => {
-      // Failed recovery: stop first if running
-      if (r.state === 'running') {
-        try { await this._doStop(r); } catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
-      }
-      if (r.state === 'failed') {
-        // Recovery stop
-        try { r.state = 'stopping'; await r.adapter.stop(); r.state = 'stopped'; r.lastTransitionAtMs = this.clock.now(); r.stoppedAtMs = this.clock.now(); }
-        catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
-      }
-      // Now start
-      try { await this._doStart(r); } catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
-      await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.restarted', accountId: aid, exchange: ex, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'running', generation: r.generation } });
-      return snapshot(r);
-    })();
+    // Build gate synchronously, set activeTransition BEFORE any await
+    const gate = this._doRestart(r);
     r.activeTransition = { operation: 'restart', promise: gate };
     try { return await gate; } finally { r.activeTransition = null; }
+  }
+
+  private async _doRestart(r: LifecycleRecord): Promise<PaperRuntimeLifecycleSnapshot> {
+    const aid = r.accountId; const ex = r.exchange;
+    await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.restarting', accountId: aid, exchange: ex, occurredAtMs: this.clock.now() });
+    // Running → stop first
+    if (r.state === 'running') {
+      try { await this._doStop(r); } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex);
+      }
+    }
+    // Failed recovery stop
+    if (r.state === 'failed') {
+      try { r.state = 'stopping'; await r.adapter.stop(); r.state = 'stopped'; r.lastTransitionAtMs = this.clock.now(); r.stoppedAtMs = this.clock.now(); }
+      catch (e: unknown) { const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex); }
+    }
+    // Now start
+    try { await this._doStart(r); } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e); r.state = 'failed'; r.lastErrorCode = 'LIFECYCLE_RESTART_FAILED'; r.lastErrorMessage = msg; r.metrics.restartFailed++; throw new PaperRuntimeLifecycleError('LIFECYCLE_RESTART_FAILED', msg, aid, ex);
+    }
+    await emitSafe(this.sink, { eventId: makeEventId(), eventType: 'runtime.restarted', accountId: aid, exchange: ex, occurredAtMs: this.clock.now(), metadata: { lifecycleState: 'running', generation: r.generation } });
+    return snapshot(r);
   }
 
   // ── Run ─────────────────────────────────────────────────────

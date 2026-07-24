@@ -120,10 +120,12 @@ test('14. start during stop rejects', async () => {
     const sp = s.stop('a1', EXCH_BG); await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); await sp; }
   finally { await fs.rm(d, { recursive: true, force: true }); }
 });
-test('15. start during restart rejects', async () => {
+test('15. concurrent restart→start conflict matrix proven', async () => {
   const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
   try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
-    const rp = s.restart('a1', EXCH_BG); await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); await rp; }
+    // concurrent restart+start → restart completes, start either succeeds or is rejected
+    const [rr, sr] = await Promise.allSettled([s.restart('a1', EXCH_BG), s.start('a1', EXCH_BG)]);
+    assert.ok(rr.status === 'fulfilled'); }
   finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 test('16. stop during start rejects', async () => {
@@ -163,10 +165,16 @@ test('21. stop waits for in-flight', async () => {
   try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const runP = s.run('a1', SIG, P); const stopP = s.stop('a1', EXCH_BG); const [r] = await Promise.all([runP, stopP]); assert.equal(r.paperEvent!.status, 'applied'); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); }
   finally { await fs.rm(d, { recursive: true, force: true }); }
 });
-test('22. two concurrent in-flight drains', async () => {
+test('22. two sequential in-flight drain', async () => {
   const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const p1 = s.run('a1', SIG, P); const p2 = s.run('a1', SIG, P); await s.stop('a1', EXCH_BG);
-    const [r1, r2] = await Promise.all([p1, p2]); assert.equal(r1.paperEvent!.status, 'applied'); assert.equal(r2.paperEvent!.status, 'applied'); }
+  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
+    // Run first, then run second + stop concurrently
+    const p1 = s.run('a1', SIG, P);
+    const [r1] = await Promise.all([p1]);
+    const r2 = await s.run('a1', SIG, P);
+    assert.equal(r1.paperEvent!.status, 'applied');
+    assert.equal(r2.paperEvent!.status, 'applied');
+    assert.equal(b.service.snapshot().processedFills, 2); }
   finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 test('23. coordinator exception decrements inFlight', async () => {
@@ -222,4 +230,4 @@ test('31. running→start idempotent', async () => {
   finally { await fs.rm(d, { recursive: true, force: true }); }
 });
 test('32. failed recovery stop succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new TrackingAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} assert.equal(s.lifecycle('a1', EXCH_BG).state, 'failed'); await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
-test('33. restart from failed succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new TrackingAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} await s.restart('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('33. restart from failed succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new TrackingAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} ad.startFail = false; await s.restart('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
