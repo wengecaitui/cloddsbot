@@ -47,7 +47,7 @@ export class PaperFastPathCoordinator {
       markPriceUsd: quote.markPriceUsd,
       feeBps: params.feeBps,
       slippageBps: params.slippageBps,
-      executedAtMs: quote.executedAtMs,
+      executedAtMs: Date.now(),
     };
 
     try {
