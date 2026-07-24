@@ -1,7 +1,8 @@
-// Stage 4A3: Lifecycle types, errors, adapter.
+// Stage 4A3-R1: Lifecycle — typed activeTransition, formal error codes, metrics.
 import type { ExchangeId } from '../data/MarketIdentity';
 
 export type PaperRuntimeLifecycleState = 'stopped' | 'starting' | 'running' | 'stopping' | 'failed';
+export type LifecycleOperation = 'start' | 'stop' | 'restart';
 
 export const LIFECYCLE_ERROR_CODES = [
   'RUNTIME_NOT_REGISTERED', 'RUNTIME_NOT_RUNNING', 'RUNTIME_ALREADY_REGISTERED',
@@ -16,12 +17,13 @@ export class PaperRuntimeLifecycleError extends Error {
   readonly accountId?: string;
   readonly exchange?: ExchangeId;
   constructor(code: PaperRuntimeLifecycleErrorCode, message: string, accountId?: string, exchange?: ExchangeId) {
-    super(message);
-    this.name = 'PaperRuntimeLifecycleError';
-    this.code = code;
-    this.accountId = accountId;
-    this.exchange = exchange;
+    super(message); this.name = 'PaperRuntimeLifecycleError'; this.code = code; this.accountId = accountId; this.exchange = exchange;
   }
+}
+
+export interface ActiveTransition {
+  readonly operation: LifecycleOperation;
+  readonly promise: Promise<PaperRuntimeLifecycleSnapshot>;
 }
 
 export interface PaperRuntimeLifecycleSnapshot {
@@ -50,13 +52,5 @@ export interface PaperRuntimeBatchResult {
   readonly errorMessage?: string;
 }
 
-// ── Lifecycle Adapter ─────────────────────────────────────────
-export interface PaperRuntimeLifecycleAdapter {
-  start(): void | Promise<void>;
-  stop(): void | Promise<void>;
-}
-
-export class NoopPaperRuntimeLifecycleAdapter implements PaperRuntimeLifecycleAdapter {
-  start(): void {}
-  stop(): void {}
-}
+export interface PaperRuntimeLifecycleAdapter { start(): void | Promise<void>; stop(): void | Promise<void>; }
+export class NoopPaperRuntimeLifecycleAdapter implements PaperRuntimeLifecycleAdapter { start(): void {} stop(): void {} }
