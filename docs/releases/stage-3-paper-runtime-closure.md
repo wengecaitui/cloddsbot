@@ -130,8 +130,12 @@ PaperFastPathCoordinator.run()
 
 - Final CI (PR #25): run 30062156148 → success
 - Final Security (PR #25): run 30062156124 → success
-- R1 evidence seal CI (PR #26): run TBD → TBD
-- R1 evidence seal Security (PR #26): run TBD → TBD
+- R1 evidence seal CI (PR #26): run 30067688180 → success
+- R1 evidence seal Security (PR #26): run 30067688180 → success
+
+### Commit A: `c25f7b5f50bbe1dd90ad3a6bb28ce20cfbaac119` — test(release): enforce same-snapshot evidence assertions
+
+### Final merge SHA: TBD (will be populated after merge)
 
 ---
 
