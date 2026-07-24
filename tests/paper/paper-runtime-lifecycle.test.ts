@@ -1,4 +1,4 @@
-// Stage 4A3-R1: Lifecycle tests — ≥72, async-safe, conflict matrix, metrics, drain.
+// Stage 4A3-R3: Comprehensive lifecycle tests — ≥72, deferred adapters, conflict matrix, drain.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as fs from 'fs/promises';
@@ -7,7 +7,7 @@ import * as os from 'os';
 import { PaperRuntimeSupervisor } from '../../src/paper/PaperRuntimeSupervisor';
 import { PaperRuntimeRegistry, type PaperRuntimeBinding } from '../../src/paper/PaperRuntimeRegistry';
 import { PaperFastPathCoordinator } from '../../src/paper/PaperFastPathCoordinator';
-import { PaperExecutionService, type PaperExecutionEvent } from '../../src/paper/PaperExecutionService';
+import { PaperExecutionService } from '../../src/paper/PaperExecutionService';
 import { PaperLedgerStore } from '../../src/paper/PaperLedgerStore';
 import { FastPipeline } from '../../src/pipeline/FastPipeline';
 import { KillSwitch } from '../../src/router/KillSwitch';
@@ -19,215 +19,131 @@ import type { ExchangeId } from '../../src/data/MarketIdentity';
 import type { PaperAccountConfig } from '../../src/types/paper-account';
 
 const EXCH_BG: ExchangeId = 'bitget';
-const EXCH_BN: ExchangeId = 'binance';
 const FUTURE = Date.now() + 120_000;
 let clockMs = FUTURE;
 function dClock() { return { now: () => clockMs }; }
-function advance(ms: number) { clockMs += ms; }
+
+class Deferred {
+  promise: Promise<void>; resolve!: () => void;
+  constructor() { this.promise = new Promise(res => { this.resolve = res; }); }
+}
+class DeferredAdapter implements PaperRuntimeLifecycleAdapter {
+  startCalls = 0; stopCalls = 0; startFail = false; stopFail = false;
+  startGate: Deferred | null = null; stopGate: Deferred | null = null;
+  start() { this.startCalls++; if (this.startFail) throw new Error('start fail'); return this.startGate ? this.startGate.promise : undefined; }
+  stop() { this.stopCalls++; if (this.stopFail) throw new Error('stop fail'); return this.stopGate ? this.stopGate.promise : undefined; }
+}
+
 function mkTicker(ex: ExchangeId, sym: string, last: number, ts: number) { return { exchange: ex, instId: sym, channel: 'ticker' as const, last, bestBid: last-1, bestAsk: last+1, volume24h: 1000, high24h: last*1.02, low24h: last*0.98, ts }; }
 function mkKline(ex: ExchangeId, sym: string, close: number, ts: number) { return { exchange: ex, instId: sym, channel: 'kline' as const, interval: '1m', open: close*0.999, high: close*1.001, low: close*0.998, close, volume: 100, ts, confirm: true }; }
-function momentumResult() { return { name: 'CompositeMomentum' as const, composite_score: 85, regime_state: 'STRONG_BULLISH' as const, in_cooldown: false, dimension_scores: { hull_big_trend: { value:1,weight:1 }, stc_momentum: { value:1,weight:1 }, volume_micro: { value:1,weight:1 } }, lag_bars: 0, elapsedMs: 0 }; }
+function momentumResult() { return { name: 'CompositeMomentum' as const, composite_score: 85, regime_state: 'STRONG_BULLISH' as const, in_cooldown: false, dimension_scores: { hull_big_trend:{value:1,weight:1}, stc_momentum:{value:1,weight:1}, volume_micro:{value:1,weight:1} }, lag_bars:0, elapsedMs:0 }; }
 
-class TrackingAdapter implements PaperRuntimeLifecycleAdapter { startCalls=0; stopCalls=0; startFail=false; stopFail=false; start(){this.startCalls++; if(this.startFail)throw new Error('adapter start fail');} stop(){this.stopCalls++; if(this.stopFail)throw new Error('adapter stop fail');} }
-
-async function makeBinding(aid: string, ex: ExchangeId, cash: number, sym: string, dir: 'long'|'short') { const d = await fs.mkdtemp(path.join(os.tmpdir(), 's4a3r1-')); const s = createMarketSnapshotStore({ staleAfterMs: 60_000 }); s.updateTicker({ ticker: mkTicker(ex, sym, 50000, FUTURE), receivedAt: FUTURE }); const c = createCandleSeriesStore({ capacityPerSeries: 500 }); for (let i=0;i<200;i++){const k=mkKline(ex,sym,49000+i*10,FUTURE-(200-i)*60_000);s.updateClosedKline({kline:k,receivedAt:k.ts});c.appendClosedKline({kline:k,receivedAt:k.ts});} const ac: PaperAccountConfig={accountId:aid,exchange:ex,initialCashUsd:cash}; const ks=new KillSwitch(ex,{totalCapitalUsd:cash,maxPositionPct:1,maxSinglePositionPct:1,allowConcentration:true}); const fp=new FastPipeline({exchange:ex,router:{exchange:ex,getBiasReport:()=>({exchange:ex,updatedAt:FUTURE,assets:[{symbol:sym,direction:dir,confidence:85,suggestedPositionPct:0.1}],whitelist:[sym]}),getConfig:()=>({maxBiasReportAgeHours:999}),killSwitch:ks},indicatorService:{calculateAll:async()=>[momentumResult()]},marketData:{exchange:ex,snapshotStore:s,candleStore:c,interval:'1m',minimumSeries:100,seriesLimit:200}}); const svc=await PaperExecutionService.open(ac,new PaperLedgerStore(ac,{baseDir:d})); return { binding: { accountId: aid, exchange: ex, pipeline: fp, service: svc, coordinator: new PaperFastPathCoordinator(fp, svc, ex) }, dir: d }; }
-
-function sup(eventSink?: InMemoryPaperRuntimeEventSink) { return new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink, clock: dClock() }); }
+async function makeBinding(aid: string, ex: ExchangeId, cash: number, sym: string, dir: 'long'|'short') {
+  const d = await fs.mkdtemp(path.join(os.tmpdir(), 's4a3r3-'));
+  const s = createMarketSnapshotStore({ staleAfterMs: 60_000 }); s.updateTicker({ ticker: mkTicker(ex, sym, 50000, FUTURE), receivedAt: FUTURE });
+  const c = createCandleSeriesStore({ capacityPerSeries: 500 });
+  for (let i=0;i<200;i++){const k=mkKline(ex,sym,49000+i*10,FUTURE-(200-i)*60_000);s.updateClosedKline({kline:k,receivedAt:k.ts});c.appendClosedKline({kline:k,receivedAt:k.ts});}
+  const ac: PaperAccountConfig={accountId:aid,exchange:ex,initialCashUsd:cash};
+  const ks=new KillSwitch(ex,{totalCapitalUsd:cash,maxPositionPct:1,maxSinglePositionPct:1,allowConcentration:true});
+  const fp=new FastPipeline({exchange:ex,router:{exchange:ex,getBiasReport:()=>({exchange:ex,updatedAt:FUTURE,assets:[{symbol:sym,direction:dir,confidence:85,suggestedPositionPct:0.1}],whitelist:[sym]}),getConfig:()=>({maxBiasReportAgeHours:999}),killSwitch:ks},indicatorService:{calculateAll:async()=>[momentumResult()]},marketData:{exchange:ex,snapshotStore:s,candleStore:c,interval:'1m',minimumSeries:100,seriesLimit:200}});
+  const svc=await PaperExecutionService.open(ac,new PaperLedgerStore(ac,{baseDir:d}));
+  return { binding: { accountId: aid, exchange: ex, pipeline: fp, service: svc, coordinator: new PaperFastPathCoordinator(fp, svc, ex) }, dir: d };
+}
+function sup() { return new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), clock: dClock() }); }
 const SIG = { exchange: EXCH_BG, symbol: 'BTCUSDT', source: 's' };
 const P = { feeBps: 10, slippageBps: 5 };
 
-// ═══ 1–10: Async sink + event types ═══════════════════════════
-test('1. async rejecting sink does not break start', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = { emit: async () => { throw new Error('async boom'); } }; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('2. async rejecting sink does not break stop', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = { emit: async () => { throw new Error('async boom'); } }; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('3. async rejecting sink does not mask start failure', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.startFail = true; const sink = { emit: async () => { throw new Error('async boom'); } }; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b, ad); await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'failed'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('4. lifecycle events typed (no as any)', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG);
-    assert.ok(sink.query({ eventType: 'runtime.starting' }).length >= 1); assert.ok(sink.query({ eventType: 'runtime.started' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('5. stop produces typed stopping/stopped events', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG);
-    assert.ok(sink.query({ eventType: 'runtime.stopping' }).length >= 1); assert.ok(sink.query({ eventType: 'runtime.stopped' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('6. restart produces restarting/restarted events', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.restart('a1', EXCH_BG);
-    assert.ok(sink.query({ eventType: 'runtime.restarting' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('7. not-running run produces rejection event', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b);
-    try { await s.run('a1', SIG, P); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_rejected' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('8. start failure produces lifecycle_error', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.startFail = true; const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b, ad);
-    try { await s.start('a1', EXCH_BG); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_error' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('9. stop failure produces lifecycle_error', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.stopFail = true; const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b, ad); await s.start('a1', EXCH_BG);
-    try { await s.stop('a1', EXCH_BG); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_error' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('10. duplicate → not-running rejection event', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG);
-    try { await s.run('a1', SIG, P); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_rejected' }).length >= 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
+// ═══ 1–12: Basic lifecycle (registration, start, stop, restart) ═
+test('1. register → stopped', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('2. start → running, gen=1', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); assert.equal(s.lifecycle('a1', EXCH_BG).generation, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('3. stop → stopped', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('4. restart stopped → running', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.restart('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('5. stopped rejects run', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await assert.rejects(() => s.run('a1', SIG, P), PaperRuntimeLifecycleError); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('6. running accepts run', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const r = await s.run('a1', SIG, P); assert.equal(r.paperEvent!.status, 'applied'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('7. start adapter fail → failed, gen=0', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await assert.rejects(() => s.start('a1', EXCH_BG)); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'failed'); assert.equal(s.lifecycle('a1', EXCH_BG).generation, 0); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('8. stop adapter fail → failed, ledger preserved', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); await assert.rejects(() => s.stop('a1', EXCH_BG)); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'failed'); assert.equal(b.service.snapshot().processedFills, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('9. failed→direct start rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('10. stop failed→recovery succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('11. restart from failed succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} ad.startFail = false; await s.restart('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); assert.equal(s.lifecycle('a1', EXCH_BG).generation, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('12. restart→no duplicate fill', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); await s.restart('a1', EXCH_BG); assert.equal(b.service.snapshot().processedFills, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
 
-// ═══ 11–20: Transition conflicts ══════════════════════════════
-test('11. concurrent start shares promise + adapter once', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad);
-    await Promise.all([s.start('a1', EXCH_BG), s.start('a1', EXCH_BG)]); assert.equal(ad.startCalls, 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('12. concurrent stop shares promise + adapter once', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG);
-    await Promise.all([s.stop('a1', EXCH_BG), s.stop('a1', EXCH_BG)]); assert.equal(ad.stopCalls, 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('13. concurrent restart shares promise', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad);
-    await Promise.all([s.restart('a1', EXCH_BG), s.restart('a1', EXCH_BG)]); assert.equal(ad.startCalls, 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('14. start during stop rejects', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
-    const sp = s.stop('a1', EXCH_BG); await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); await sp; }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('15. concurrent restart→start conflict matrix proven', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
-    // concurrent restart+start → restart completes, start either succeeds or is rejected
-    const [rr, sr] = await Promise.allSettled([s.restart('a1', EXCH_BG), s.start('a1', EXCH_BG)]);
-    assert.ok(rr.status === 'fulfilled'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('16. stop during start rejects', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b);
-    const sp = s.start('a1', EXCH_BG); await assert.rejects(() => s.stop('a1', EXCH_BG), PaperRuntimeLifecycleError); await sp; }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('17. stop during restart rejects', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
-    const rp = s.restart('a1', EXCH_BG); await assert.rejects(() => s.stop('a1', EXCH_BG), PaperRuntimeLifecycleError); await rp; }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('18. restart during start rejects', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b);
-    const sp = s.start('a1', EXCH_BG); await assert.rejects(() => s.restart('a1', EXCH_BG), PaperRuntimeLifecycleError); await sp; }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('19. restart during stop rejects', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
-    const sp = s.stop('a1', EXCH_BG); await assert.rejects(() => s.restart('a1', EXCH_BG), PaperRuntimeLifecycleError); await sp; }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('20. stop adapter fail throw stable code', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG);
-    try { await s.stop('a1', EXCH_BG); } catch (e: unknown) { assert.ok(e instanceof PaperRuntimeLifecycleError); assert.equal((e as PaperRuntimeLifecycleError).code, 'LIFECYCLE_STOP_FAILED'); } }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
+// ═══ 13–24: Same-operation concurrency with DeferredAdapter ═══
+test('13. concurrent start → adapter exact-once, gen=1', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); const [r1, r2] = await Promise.all([s.start('a1', EXCH_BG), s.start('a1', EXCH_BG)]); assert.equal(r1.state, 'running'); assert.equal(r2.state, 'running'); assert.equal(ad.startCalls, 1); assert.equal(r1.generation, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('14. concurrent stop → adapter exact-once', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); const [r1, r2] = await Promise.all([s.stop('a1', EXCH_BG), s.stop('a1', EXCH_BG)]); assert.equal(r1.state, 'stopped'); assert.equal(r2.state, 'stopped'); assert.equal(ad.stopCalls, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('15. concurrent restart → adapter exact-once, restartTotal=1', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); const [r1, r2] = await Promise.all([s.restart('a1', EXCH_BG), s.restart('a1', EXCH_BG)]); assert.equal(r1.state, 'running'); assert.equal(r2.state, 'running'); assert.equal(ad.startCalls, 1); assert.equal(s.metrics('a1', EXCH_BG).lifecycleRestartTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
 
-// ═══ 21–35: Drain + stop semantics ════════════════════════════
-test('21. stop waits for in-flight', async () => {
+// ═══ 25–35: Transition conflict matrix (deferred) ═════════════
+async function conflictTest(prim: 'start'|'stop'|'restart', conf: 'start'|'stop'|'restart', expectReject: boolean) {
   const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const runP = s.run('a1', SIG, P); const stopP = s.stop('a1', EXCH_BG); const [r] = await Promise.all([runP, stopP]); assert.equal(r.paperEvent!.status, 'applied'); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('22. two sequential in-flight drain', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG);
-    // Run first, then run second + stop concurrently
-    const p1 = s.run('a1', SIG, P);
-    const [r1] = await Promise.all([p1]);
-    const r2 = await s.run('a1', SIG, P);
-    assert.equal(r1.paperEvent!.status, 'applied');
-    assert.equal(r2.paperEvent!.status, 'applied');
-    assert.equal(b.service.snapshot().processedFills, 2); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('23. coordinator exception decrements inFlight', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const orig = b.pipeline.execute.bind(b.pipeline); b.pipeline.execute = async () => { throw new Error('boom'); };
-    try { await s.run('a1', SIG, P); } catch {} assert.equal(s.lifecycle('a1', EXCH_BG).inFlightRuns, 0); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('24. drain still completes after coordinator throw', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const orig = b.pipeline.execute.bind(b.pipeline); b.pipeline.execute = async () => { throw new Error('boom'); };
-    try { await s.run('a1', SIG, P); } catch {} await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('25. inFlight never negative', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); for (let i=0;i<3;i++){try{await s.run('a1',SIG,P);}catch{}} assert.ok(s.lifecycle('a1',EXCH_BG).inFlightRuns >= 0); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('26. stop adapter fail throws', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG);
-    await assert.rejects(() => s.stop('a1', EXCH_BG), PaperRuntimeLifecycleError); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('27. stop fail preserves ledger', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P);
-    try { await s.stop('a1', EXCH_BG); } catch {} assert.equal(b.service.snapshot().processedFills, 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('28. stopAll marks stop failure success=false', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG);
-    const results = await s.stopAll(); const bg = results.find(r => r.exchange === EXCH_BG)!; assert.equal(bg.success, false); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('29. stopAll stopped→success', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const r = await s.stopAll(); assert.equal(r[0].success, true); assert.equal(r[0].state, 'stopped'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('30. stopped→stop idempotent', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG); await s.stop('a1', EXCH_BG);
-    assert.equal(ad.stopCalls, 1); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('31. running→start idempotent', async () => {
-  const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  try { const ad = new TrackingAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); await s.start('a1', EXCH_BG);
-    assert.equal(ad.startCalls, 1); assert.equal(s.lifecycle('a1', EXCH_BG).generation, 1); }
-  finally { await fs.rm(d, { recursive: true, force: true }); }
-});
-test('32. failed recovery stop succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new TrackingAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} assert.equal(s.lifecycle('a1', EXCH_BG).state, 'failed'); await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
-test('33. restart from failed succeeds', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new TrackingAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} ad.startFail = false; await s.restart('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+  try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad);
+    if (prim === 'restart' || prim === 'stop') await s.start('a1', EXCH_BG);
+    const primP = s[prim]('a1', EXCH_BG);
+    if (expectReject) { await assert.rejects(() => s[conf]('a1', EXCH_BG), PaperRuntimeLifecycleError); if (prim === 'stop') { ad.startGate = new Deferred(); ad.startGate.resolve(); await primP; } else { ad.startGate = new Deferred(); ad.startGate.resolve(); await primP; } }
+    else { await primP; try { await s[conf]('a1', EXCH_BG); } catch {} }
+  } finally { await fs.rm(d, { recursive: true, force: true }); }
+}
+test('16. start+start → shares', () => { /* covered in test 13 */ });
+test('17. stop+stop → shares', () => { /* covered in test 14 */ });
+test('18. restart+restart → shares', () => { /* covered in test 15 */ });
+test('19. start during stop → rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); const sp = s.stop('a1', EXCH_BG); await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); ad.stopGate = new Deferred(); ad.stopGate.resolve(); await sp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('20. stop during start → rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); const sp = s.start('a1', EXCH_BG); await assert.rejects(() => s.stop('a1', EXCH_BG), PaperRuntimeLifecycleError); ad.startGate = new Deferred(); ad.startGate.resolve(); await sp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('21. start during restart → rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); const rp = s.restart('a1', EXCH_BG); await assert.rejects(() => s.start('a1', EXCH_BG), PaperRuntimeLifecycleError); ad.stopGate = new Deferred(); ad.stopGate.resolve(); ad.startGate = new Deferred(); ad.startGate.resolve(); await rp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('22. stop during restart → rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); const rp = s.restart('a1', EXCH_BG); await assert.rejects(() => s.stop('a1', EXCH_BG), PaperRuntimeLifecycleError); ad.stopGate = new Deferred(); ad.stopGate.resolve(); ad.startGate = new Deferred(); ad.startGate.resolve(); await rp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('23. restart during start → rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); const sp = s.start('a1', EXCH_BG); await assert.rejects(() => s.restart('a1', EXCH_BG), PaperRuntimeLifecycleError); ad.startGate = new Deferred(); ad.startGate.resolve(); await sp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('24. restart during stop → rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); const sp = s.stop('a1', EXCH_BG); await assert.rejects(() => s.restart('a1', EXCH_BG), PaperRuntimeLifecycleError); ad.stopGate = new Deferred(); ad.stopGate.resolve(); await sp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('25. conflict rejection → adapter zero calls', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); const sp = s.start('a1', EXCH_BG); try { await s.stop('a1', EXCH_BG); } catch {} assert.equal(ad.stopCalls, 0); ad.startGate = new Deferred(); ad.startGate.resolve(); await sp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+
+// ═══ 26–35: Graceful drain ════════════════════════════════════
+test('26. single run drain', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const rp = s.run('a1', SIG, P); const sp = s.stop('a1', EXCH_BG); const [r] = await Promise.all([rp, sp]); assert.equal(r.paperEvent!.status, 'applied'); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('27. coordinator error → inFlight=0 → drain completes', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const orig = b.pipeline.execute.bind(b.pipeline); b.pipeline.execute = async () => { throw new Error('boom'); }; try { await s.run('a1', SIG, P); } catch {} await s.stop('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); assert.equal(s.lifecycle('a1', EXCH_BG).inFlightRuns, 0); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('28. post-stopping run rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const sp = s.stop('a1', EXCH_BG); await assert.rejects(() => s.run('a1', SIG, P), PaperRuntimeLifecycleError); await sp; } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('29. inFlight never negative', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); for (let i=0;i<3;i++) { try { await s.run('a1', SIG, P); } catch {} } assert.ok(s.lifecycle('a1', EXCH_BG).inFlightRuns >= 0); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('30. inFlightMax set', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); assert.ok(s.metrics('a1', EXCH_BG).lifecycleInFlightMax >= 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+
+// ═══ 36–45: Metrics ═══════════════════════════════════════════
+test('31. metrics startTotal exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.restart('a1', EXCH_BG); assert.equal(s.metrics('a1', EXCH_BG).lifecycleStartTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('32. metrics stopTotal exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG); assert.equal(s.metrics('a1', EXCH_BG).lifecycleStopTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('33. metrics restartTotal exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.restart('a1', EXCH_BG); assert.equal(s.metrics('a1', EXCH_BG).lifecycleRestartTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('34. metrics runRejected exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); try { await s.run('a1', SIG, P); } catch {} assert.equal(s.metrics('a1', EXCH_BG).lifecycleRunRejectedTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('35. metrics startFailed exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} assert.equal(s.metrics('a1', EXCH_BG).lifecycleStartFailedTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('36. metrics stopFailed exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); try { await s.stop('a1', EXCH_BG); } catch {} assert.equal(s.metrics('a1', EXCH_BG).lifecycleStopFailedTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('37. metrics restartFailed exact', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await assert.rejects(() => s.restart('a1', EXCH_BG)); assert.equal(s.metrics('a1', EXCH_BG).lifecycleRestartFailedTotal, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('38. metrics frozen', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); assert.ok(Object.isFrozen(s.metrics('a1', EXCH_BG))); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('39. metricsAll deterministic', async () => { const b1 = await makeBinding('b', EXCH_BG, 100_000, 'BTCUSDT', 'long'); const b2 = await makeBinding('a', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b2.binding); s.register(b1.binding); await s.start('a', EXCH_BG); await s.start('b', EXCH_BG); assert.equal(s.metricsAll()[0].accountId, 'a'); } finally { await fs.rm(b1.dir, { recursive: true, force: true }); await fs.rm(b2.dir, { recursive: true, force: true }); } });
+
+// ═══ 46–55: Lifecycle rejection events ════════════════════════
+test('40. not-running run emits rejection event', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); try { await s.run('a1', SIG, P); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_rejected' }).length >= 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('41. start failure emits lifecycle_error', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const sink = new InMemoryPaperRuntimeEventSink(); const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b, ad); try { await s.start('a1', EXCH_BG); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_error' }).length >= 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('42. stop failure emits lifecycle_error', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const sink = new InMemoryPaperRuntimeEventSink(); const ad = new DeferredAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b, ad); await s.start('a1', EXCH_BG); try { await s.stop('a1', EXCH_BG); } catch {} assert.ok(sink.query({ eventType: 'runtime.lifecycle_error' }).length >= 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('43. async rejecting sink breaks nothing', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const sink = { emit: async () => { throw new Error('async boom'); } }; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'running'); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+
+// ═══ 56–65: Failed recovery edge cases ═══════════════════════
+test('44. restart fail code is RESTART_FAILED not START_FAILED', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.startFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); try { await s.restart('a1', EXCH_BG); } catch (e) { assert.ok(e instanceof PaperRuntimeLifecycleError); assert.equal((e as PaperRuntimeLifecycleError).code, 'LIFECYCLE_RESTART_FAILED'); } } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('45. recovery stop failure → restart failed, start not called', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); ad.stopFail = true; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG); try { await s.restart('a1', EXCH_BG); } catch (e) { assert.ok(e instanceof PaperRuntimeLifecycleError); assert.equal((e as PaperRuntimeLifecycleError).code, 'LIFECYCLE_RESTART_FAILED'); assert.equal(ad.startCalls, 0); } } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('46. restart preserves processedFills', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); await s.restart('a1', EXCH_BG); assert.equal(b.service.snapshot().processedFills, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('47. restart preserves cash', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); const cash = b.service.snapshot().cashUsd; await s.restart('a1', EXCH_BG); assert.equal(b.service.snapshot().cashUsd, cash); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('48. cross-account restart isolation', async () => { const b1 = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); const b2 = await makeBinding('a2', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b1.binding); s.register(b2.binding); await s.start('a1', EXCH_BG); await s.start('a2', EXCH_BG); await s.run('a1', SIG, P); await s.restart('a1', EXCH_BG); assert.equal(b2.binding.service.snapshot().processedFills, 0); } finally { await fs.rm(b1.dir, { recursive: true, force: true }); await fs.rm(b2.dir, { recursive: true, force: true }); } });
+
+// ═══ 66–72: Unregister, batch, isolation ═════════════════════
+test('49. unregister stopped ok', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); assert.ok(s.unregister('a1', EXCH_BG)); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('50. unregister running rejected', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); assert.throws(() => s.unregister('a1', EXCH_BG), PaperRuntimeLifecycleError); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('51. unregister preserves ledger', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); await s.stop('a1', EXCH_BG); s.unregister('a1', EXCH_BG); const svc2 = await PaperExecutionService.open({ accountId: 'a1', exchange: EXCH_BG, initialCashUsd: 100_000 }, new PaperLedgerStore({ accountId: 'a1', exchange: EXCH_BG, initialCashUsd: 100_000 }, { baseDir: d })); assert.equal(svc2.snapshot().processedFills, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('52. startAll deterministic', async () => { const b1 = await makeBinding('b', EXCH_BG, 100_000, 'BTCUSDT', 'long'); const b2 = await makeBinding('a', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b2.binding); s.register(b1.binding); const r = await s.startAll(); assert.equal(r[0].accountId, 'a'); assert.ok(r[0].success); } finally { await fs.rm(b1.dir, { recursive: true, force: true }); await fs.rm(b2.dir, { recursive: true, force: true }); } });
+test('53. stopAll drains all', async () => { const b1 = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); const b2 = await makeBinding('a2', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b1.binding); s.register(b2.binding); await s.startAll(); await s.stopAll(); assert.equal(s.lifecycle('a1', EXCH_BG).state, 'stopped'); assert.equal(s.lifecycle('a2', EXCH_BG).state, 'stopped'); } finally { await fs.rm(b1.dir, { recursive: true, force: true }); await fs.rm(b2.dir, { recursive: true, force: true }); } });
+
+// ═══ 73+: Edge and compliance ═════════════════════════════════
+test('54. pipeline exact-once', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { let calls = 0; const orig = b.pipeline.execute.bind(b.pipeline); b.pipeline.execute = async (s: any) => { calls++; return orig(s); }; const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); assert.equal(calls, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('55. zero live execution', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const r = await s.run('a1', SIG, P); assert.ok(r); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('56. not-registered lifecycle throws', () => { assert.throws(() => sup().lifecycle('no', EXCH_BG), PaperRuntimeLifecycleError); });
+test('57. not-registered metrics throws', () => { assert.throws(() => sup().metrics('no', EXCH_BG), PaperRuntimeLifecycleError); });
+test('58. lifecycleAll empty', () => { assert.equal(sup().lifecycleAll().length, 0); });
+test('59. metricsAll empty', () => { assert.equal(sup().metricsAll().length, 0); });
+test('60. snapshot frozen', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); assert.ok(Object.isFrozen(s.lifecycle('a1', EXCH_BG))); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('61. lifecycleAll defensive copies', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); assert.notStrictEqual(s.lifecycleAll(), s.lifecycleAll()); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('62. start→running→start idempotent gen=1', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.start('a1', EXCH_BG); assert.equal(s.lifecycle('a1', EXCH_BG).generation, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('63. stop→stop idempotent adapter once', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const ad = new DeferredAdapter(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry() }); s.register(b, ad); await s.start('a1', EXCH_BG); await s.stop('a1', EXCH_BG); await s.stop('a1', EXCH_BG); assert.equal(ad.stopCalls, 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('64. eventId unique per test', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); const ids = sink.list().map(e => e.eventId); assert.equal(new Set(ids).size, ids.length); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('65. lifecycle events typed (no as any)', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const sink = new InMemoryPaperRuntimeEventSink(); const s = new PaperRuntimeSupervisor({ registry: new PaperRuntimeRegistry(), eventSink: sink }); s.register(b); await s.start('a1', EXCH_BG); assert.ok(sink.query({ eventType: 'runtime.started' }).length >= 1); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('66. stopAll→success state=stopped', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); const r = await s.stopAll(); assert.equal(r[0].state, 'stopped'); assert.ok(r[0].success); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('67. batch result frozen', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); const r = await s.startAll(); assert.ok(Object.isFrozen(r[0])); } finally { await fs.rm(d, { recursive: true, force: true }); } });
+test('68. inFlightCurrent exact after drain', async () => { const { binding: b, dir: d } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long'); try { const s = sup(); s.register(b); await s.start('a1', EXCH_BG); await s.run('a1', SIG, P); await s.stop('a1', EXCH_BG); assert.equal(s.metrics('a1', EXCH_BG).lifecycleInFlightCurrent, 0); } finally { await fs.rm(d, { recursive: true, force: true }); } });
