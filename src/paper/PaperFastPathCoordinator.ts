@@ -21,6 +21,14 @@ export class PaperFastPathCoordinator {
     if (!isExchangeId(exchange)) throw new Error('PaperCoordinator: invalid exchange');
   }
 
+  /** Stage 4A1-R1: read-only exchange identity. */
+  getExchange(): ExchangeId { return this.exchange; }
+
+  /** Stage 4A1-R1: verify binding integrity — same pipieline, service, exchange. */
+  isBoundTo(pipeline: FastPipeline, service: PaperExecutionService, exchange: ExchangeId): boolean {
+    return this.pipeline === pipeline && this.service === service && this.exchange === exchange;
+  }
+
   async run(
     signal: { exchange: ExchangeId; symbol: string; source: string },
     params: { feeBps: number; slippageBps: number },

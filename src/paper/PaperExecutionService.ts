@@ -1,4 +1,5 @@
 // Stage 3B4C13: Instance-based Paper Execution Service with dynamic execution input.
+import type { ExchangeId } from '../data/MarketIdentity';
 import type { PaperAccountConfig, PaperAccountSnapshot, PaperLedgerEntry } from '../types/paper-account';
 import type { TradeIntent } from '../types/trade-intent';
 import type { FillSimulatorConfig } from './FillSimulator';
@@ -29,18 +30,25 @@ export interface ExecuteParams {
 export class PaperExecutionService {
   private broker: PaperBroker;
   private counter = 0;
+  private canonical: PaperAccountConfig;
 
-  private constructor(broker: PaperBroker) {
+  private constructor(broker: PaperBroker, config: PaperAccountConfig) {
     this.broker = broker;
+    this.canonical = canonicalizePaperAccountConfig(config);
   }
 
   /** Open a service bound to one canonical account + persistence. */
   static async open(config: PaperAccountConfig, persistence: PaperBrokerPersistence): Promise<PaperExecutionService> {
     const canonical = canonicalizePaperAccountConfig(config);
     const broker = await PaperBroker.open(canonical, persistence);
-    const svc = new PaperExecutionService(broker);
+    const svc = new PaperExecutionService(broker, config);
     svc.counter = broker.snapshot().sequence;
     return svc;
+  }
+
+  /** Stage 4A1-R1: read-only identity — canonical config, no internal state leaked. */
+  getIdentity(): { readonly accountId: string; readonly exchange: ExchangeId } {
+    return { accountId: this.canonical.accountId, exchange: this.canonical.exchange };
   }
 
   snapshot(): PaperAccountSnapshot { return this.broker.snapshot(); }
