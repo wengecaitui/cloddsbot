@@ -1,8 +1,10 @@
 # Stage 3 — Paper Runtime Foundation: Release Closure
 
-**Date:** 2026-07-24  
-**Final SHA:** `8e6b6f27458340604f763acb535dffb2b222ae83`  
-**Baseline SHA:** `1d65c81d846ca4b0b3d1ceb1252b3c722c1f000d` (post-STAGE 3B4C10 merge)
+**Date:** 2026-07-24
+**Previous closure merge:** `bdeb6f76d10435190bfb940d09290d2aff318fad`
+**PR #25 head:** `f1bd102f8a5d1419dac84e81ff23f438e1032c67`
+**CI (PR #25):** `30062156148` success
+**Security (PR #25):** `30062156124` success
 
 ---
 
@@ -111,7 +113,7 @@ PaperFastPathCoordinator.run()
 
 | Suite | Count | Status |
 |-------|-------|--------|
-| PaperFastPathCoordinator | 10/10 | ✓ |
+| PaperFastPathCoordinator (real same-snapshot) | 8/8 | ✓ |
 | Fill Simulator | 50/50 | ✓ |
 | Paper Account Ledger | 125/125 | ✓ |
 | Paper Broker | 38/38 | ✓ |
@@ -120,14 +122,16 @@ PaperFastPathCoordinator.run()
 | 3B4C7 Focused | 55/55 | ✓ |
 | Bridge & SlowPipeline | 29/29 | ✓ |
 | Core 14-suite | 477/477 | ✓ |
-| **Total** | **862/862** | **0 fail** |
+| **Total** | **860/860** | **0 fail** |
 
 ---
 
 ## CI / Security
 
-- Final CI: run 30060126279 → success (PR #24)
-- Final Security: run 30060126274 → success (PR #24)
+- Final CI (PR #25): run 30062156148 → success
+- Final Security (PR #25): run 30062156124 → success
+- R1 evidence seal CI (PR #26): run TBD → TBD
+- R1 evidence seal Security (PR #26): run TBD → TBD
 
 ---
 
@@ -148,18 +152,16 @@ The only external dependency in the paper execution path is `crypto.createHash('
 ## Known Non-Blocking Technical Debt
 
 1. **KillSwitch default enabled=false / totalCapitalUsd=0:** all trade commands reject until runtime config explicitly enables; no paper trades execute through the real KillSwitch in test environment.
-2. **FastPipeline marketData path:** executionQuote requires MarketSnapshotStore with real ticker data; test mocks inject quote directly.
-3. **IndicatorService bridge:** full PythonBridgeDaemon not tested in paper path; mock indicators used for DecisionEngine in coordinator tests.
+2. **FastPipeline marketData path:** executionQuote requires MarketSnapshotStore with real ticker data; verified via real same-snapshot test (quote equality proven).
+3. **IndicatorService CompositeMomentum bridge:** real trade decisions require full indicator pipeline; current coordinator tests prove quote extraction, skip/defense/mismatch/stale paths.
 4. **Multi-exchange routing:** PaperBroker is single-exchange; multi-exchange orchestration is Stage 4 scope.
-
----
 
 ## Stage 4 Entry Approval
 
-- Full paper path verified: TradIntent → Fill → Ledger → Store → Restart
+- Full paper path verified: TradeIntent → Fill → Ledger → Store → Restart
+- Real same-snapshot executionQuote proven via MarketSnapshotStore + ticker/kline data
 - All identity contracts in place
 - Fail-closed proven at every level
-- CI/Security green on final merge commit
 - Zero live execution across entire Stage 3
 
-**APPROVED: Stage 4 — Real Execution Bridge may begin.**
+**APPROVED: Stage 4 — Paper Multi-Exchange Runtime, Observability and Validation may begin.**
