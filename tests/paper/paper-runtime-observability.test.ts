@@ -146,9 +146,24 @@ test('11. account isolation in events', async () => {
 
 test('12. exchange isolation in events', async () => {
   const b1 = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
-  });
+  const b2 = await makeBinding('a1', EXCH_BN, 200_000, 'ETHUSDT', 'long');
+  try { const sink = new InMemoryPaperRuntimeEventSink(); const r = new PaperRuntimeRegistry({ eventSink: sink }); r.register(b1.binding); r.register(b2.binding);
+    await r.run('a1', SIG, P); await r.run('a1', { exchange: EXCH_BN, symbol: 'ETHUSDT', source: 's' }, P);
+    assert.equal(sink.query({ exchange: EXCH_BG }).length, 4);
+    assert.equal(sink.query({ exchange: EXCH_BN }).length, 4); }
+  finally { await fs.rm(b1.dir, { recursive: true, force: true }); await fs.rm(b2.dir, { recursive: true, force: true }); }
+});
 
-  test('14. clear removes events', () => {
+test('13. query by eventType', async () => {
+  const { binding, dir } = await makeBinding('a1', EXCH_BG, 100_000, 'BTCUSDT', 'long');
+  try { const sink = new InMemoryPaperRuntimeEventSink(); const r = new PaperRuntimeRegistry({ eventSink: sink }); r.register(binding); await r.run('a1', SIG, P);
+    assert.ok(sink.query({ eventType: 'paper.applied' }).length >= 1); }
+  finally { await fs.rm(dir, { recursive: true, force: true }); }
+});
+
+test('14. clear removes events', () => {
+  const sink = new InMemoryPaperRuntimeEventSink();
+  sink.emit({ eventId: 'e1', eventType: 'run.started', accountId: 'a', exchange: EXCH_BG, occurredAtMs: 1 });
   assert.equal(sink.list().length, 1); sink.clear(); assert.equal(sink.list().length, 0);
 });
 
@@ -181,6 +196,7 @@ test('18. healthAll deterministic order', async () => {
   const b1 = await makeBinding('b', EXCH_BG, 100_000, 'BTCUSDT', 'long');
   const b2 = await makeBinding('a', EXCH_BG, 100_000, 'BTCUSDT', 'long');
   try { const r = new PaperRuntimeRegistry(); r.register(b2.binding); r.register(b1.binding);
+    await r.run('b', SIG, P); await r.run('a', SIG, P);
     const all = r.healthAll(); assert.equal(all.length, 2); assert.equal(all[0].accountId, 'a'); }
   finally { await fs.rm(b1.dir, { recursive: true, force: true }); await fs.rm(b2.dir, { recursive: true, force: true }); }
 });
