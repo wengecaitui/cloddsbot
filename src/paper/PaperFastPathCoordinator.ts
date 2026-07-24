@@ -1,4 +1,4 @@
-// Stage 3B4C14-R1: Paper Fast Path Coordinator — bind pipeline+service+exchange at construct.
+// Stage 3B4C15-R2: Same-snapshot contract — executedAtMs from quote, identity consistency.
 import type { ExchangeId } from '../data/MarketIdentity';
 import { isExchangeId } from '../data/MarketIdentity';
 import type { TradeIntent } from '../types/trade-intent';
@@ -35,6 +35,13 @@ export class PaperFastPathCoordinator {
       return { pipelineResult };
     }
 
+    // ── Identity consistency gates (R2) ──
+    const intent = pipelineResult.tradeIntent;
+    if (pipelineResult.exchange !== this.exchange) return { pipelineResult };
+    if (pipelineResult.symbol !== signal.symbol) return { pipelineResult };
+    if (intent.exchange !== this.exchange) return { pipelineResult };
+    if (intent.symbol !== signal.symbol) return { pipelineResult };
+
     const quote = pipelineResult.executionQuote;
     if (!quote) return { pipelineResult };
     if (!isExchangeId(quote.exchange) || quote.exchange !== this.exchange) return { pipelineResult };
@@ -47,11 +54,11 @@ export class PaperFastPathCoordinator {
       markPriceUsd: quote.markPriceUsd,
       feeBps: params.feeBps,
       slippageBps: params.slippageBps,
-      executedAtMs: Date.now(),
+      executedAtMs: quote.executedAtMs,
     };
 
     try {
-      const paperEvent = await this.service.execute(pipelineResult.tradeIntent, execParams);
+      const paperEvent = await this.service.execute(intent, execParams);
       return { pipelineResult, paperEvent };
     } catch {
       return { pipelineResult };
