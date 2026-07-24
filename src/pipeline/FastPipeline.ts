@@ -121,6 +121,9 @@ export class FastPipeline extends EventEmitter {
     };
   }
 
+  /** Stage 4A1-R1: read-only exchange identity. */
+  getExchange(): ExchangeId { return this.config.exchange; }
+
   async execute(signal: {
     exchange: ExchangeId;
     source: string;
