@@ -135,7 +135,7 @@ PaperFastPathCoordinator.run()
 
 ### Commit A: `c25f7b5f50bbe1dd90ad3a6bb28ce20cfbaac119` — test(release): enforce same-snapshot evidence assertions
 
-### Final merge SHA: TBD (will be populated after merge)
+### Final merge SHA: `ef7cc690e1e53ac414a5976f86a22a856ce0cac9`
 
 ---
 
